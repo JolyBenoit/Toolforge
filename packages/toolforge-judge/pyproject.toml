@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "toolforge-judge"
+version = "0.1.0"
+description = "Per-tool and per-pipeline metrics + LLM Judges over production telemetry"
+requires-python = ">=3.11"
+dependencies = [
+    "toolforge-core",
+    "toolforge-telemetry",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toolforge_judge"]
+
+[tool.uv.sources]
+toolforge-core = { workspace = true }
+toolforge-telemetry = { workspace = true }

@@ -1,0 +1,31 @@
+[tool.uv.workspace]
+members = [
+    "packages/toolforge-core",
+    "packages/toolforge-registry",
+    "packages/toolforge-mcp-creator",
+    "packages/toolforge-mcp-usecase",
+    "packages/toolforge-sandbox",
+    "packages/toolforge-telemetry",
+    "packages/toolforge-tui",
+    "packages/toolforge-cli",
+    "packages/toolforge-judge",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[dependency-groups]
+dev = [
+    "anyio>=4.13.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+]

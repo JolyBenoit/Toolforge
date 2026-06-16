@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+*.env
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+.claude/
+use_cases/*
+
+# uv
+.uv/
+uv.lock
+
+# Docker
+.docker/
+
+# ToolForge runtime data & secrets
+# local registry + recorded telemetry
+data/
+# handler output files
+outputs/
+# local use-case prompts / inputs
+use_cases/
+# real config — may contain secrets / API keys
+toolforge.toml
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml

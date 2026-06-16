@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+# uv for runtime dependency management (uv run --with <req>)
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+
+# Runner script baked into the image — single source of truth is runner.py
+COPY packages/toolforge-sandbox/src/toolforge_sandbox/runner.py /app/runner.py
+
+# Non-root user — additional defence layer
+RUN useradd -m -u 1000 sandbox
+USER sandbox
+
+# Handlers access inputs/outputs via volume mounts:
+#   -v /host/inputs:/inputs:ro
+#   -v /host/outputs:/outputs:rw
+VOLUME ["/inputs", "/outputs"]
+
+CMD ["python", "/app/runner.py"]

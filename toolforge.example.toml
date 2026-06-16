@@ -1,0 +1,81 @@
+# ToolForge configuration example
+# Copy to toolforge.toml and fill in your values.
+# Paths are relative to this file's directory.
+
+# ---------------------------------------------------------------------------
+# LLM providers
+# ---------------------------------------------------------------------------
+
+[llm.providers.anthropic]
+api_key_env = "ANTHROPIC_API_KEY"   # name of the environment variable
+
+# Uncomment for OpenAI-compatible providers (Z.ai, OpenRouter, vLLM …)
+# [llm.providers.zai]
+# api_key_env = "ZAI_API_KEY"
+# base_url    = "https://api.z.ai/v1"
+
+# ---------------------------------------------------------------------------
+# Creator agent  (interactive tool-design loop)
+# ---------------------------------------------------------------------------
+
+[llm.creator]
+provider           = "anthropic"
+model              = "claude-opus-4-7"
+temperature        = 0.7
+max_tokens         = 8192
+system_prompt_file = "prompts/creator_system.md"
+
+# ---------------------------------------------------------------------------
+# Consumer agent  (task-execution loop)
+# ---------------------------------------------------------------------------
+
+[llm.consumer]
+provider           = "anthropic"
+model              = "claude-sonnet-4-6"
+temperature        = 0.3
+max_tokens         = 4096
+system_prompt_file = "prompts/consumer_system.md"
+
+# ---------------------------------------------------------------------------
+# Judge agent  (evaluates telemetry; reuses [llm.creator] if this is omitted)
+# ---------------------------------------------------------------------------
+
+[llm.judge]
+provider           = "anthropic"
+model              = "claude-sonnet-4-6"
+temperature        = 0.2
+max_tokens         = 8192
+system_prompt_file = "prompts/judge_static_system.md"
+
+# ---------------------------------------------------------------------------
+# LLM tools  (available to handler code via llm.complete("default", prompt))
+# ---------------------------------------------------------------------------
+
+# [llm.tools.default]
+# provider    = "anthropic"
+# model       = "claude-haiku-4-5-20251001"
+# max_tokens  = 2048
+# temperature = 0.3
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+
+[sandbox]
+timeout_seconds = 30
+
+# ---------------------------------------------------------------------------
+# Telemetry  (optional OpenTelemetry export)
+# ---------------------------------------------------------------------------
+
+[telemetry]
+otel_enabled  = false
+otel_endpoint = ""   # e.g. "http://localhost:4318"
+
+# ---------------------------------------------------------------------------
+# TUI
+# ---------------------------------------------------------------------------
+
+[tui]
+theme     = "dark"    # "dark" | "light"
+log_level = "INFO"

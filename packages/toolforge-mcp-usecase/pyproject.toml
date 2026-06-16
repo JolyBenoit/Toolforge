@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "toolforge-mcp-usecase"
+version = "0.1.0"
+description = "MCP server exposing the active tools of a run to external consumers"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "toolforge-registry",
+    "toolforge-sandbox",
+    "toolforge-telemetry",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.uv.sources]
+toolforge-registry = { workspace = true }
+toolforge-sandbox = { workspace = true }
+toolforge-telemetry = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/toolforge_mcp_usecase"]
