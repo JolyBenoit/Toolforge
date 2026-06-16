@@ -20,21 +20,21 @@ The project is framework-agnostic on the consumption side: tools are exposed via
 ┌─────────────────────────────────────────────────────────────┐
 │  toolforge CLI                                              │
 │                                                             │
-│  creator run ──► toolforge-mcp-creator (subprocess, stdio) │
+│  creator run ──► toolforge-mcp-creator (subprocess, stdio)  │
 │  │               ├─ propose / validate / promote / deprecate│
-│  │               ├─ toolforge-registry  (SQLite + files)   │
-│  │               └─ toolforge-sandbox   (uv / Docker)      │
-│  │                                                         │
-│  │  LLM ◄── toolforge-core (Anthropic / OpenAI-compat)    │
-│  └─ toolforge-tui  (Textual interactive session)           │
+│  │               ├─ toolforge-registry  (SQLite + files)    │
+│  │               └─ toolforge-sandbox   (uv / Docker)       │
+│  │                                                          │
+│  │  LLM ◄── toolforge-core (Anthropic / OpenAI-compat)      │
+│  └─ toolforge-tui  (Textual interactive session)            │
 │                                                             │
-│  consumer run ─► toolforge-mcp-usecase (subprocess, stdio) │
+│  consumer run ─► toolforge-mcp-usecase (subprocess, stdio)  │
 │                  ├─ call active tools                       │
 │                  ├─ toolforge-registry                      │
 │                  └─ toolforge-sandbox                       │
 │                                                             │
-│  Runs are recorded by toolforge-telemetry, then scored by  │
-│  toolforge-judge (reliability / selection / stability)     │
+│  Runs are recorded by toolforge-telemetry, then scored by   │
+│  toolforge-judge (reliability / selection / stability)      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
