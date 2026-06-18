@@ -23,6 +23,7 @@ from .env import MetricEnv
 # Status constants for a MetricValue.
 OK = "ok"                       # computed from telemetry
 REQUIRES_JUDGE = "requires_judge"   # needs a Judge verdict first
+JUDGED = "judged"               # a Judge assessed it, but returned no usable value
 INSUFFICIENT_DATA = "insufficient_data"  # below env.min_samples
 NOT_COMPUTABLE = "not_computable"   # needs replay / counterfactual machinery
 

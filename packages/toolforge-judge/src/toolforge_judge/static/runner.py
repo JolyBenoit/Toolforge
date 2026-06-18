@@ -7,12 +7,18 @@ cleanly.
 """
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from ..metrics.data import TaskRecord, TelemetryReader
 from .judge import StaticJudge
 from .models import StaticJudgeResult, ToolSpec, UseCaseSpec
 from .store import JudgeStore, NullJudgeStore
+
+# Called after each task is judged, with (judged_so_far, total) — lets the TUI
+# render incremental progress over a long window.
+ProgressFn = Callable[[int, int], None]
 
 
 class StaticJudgeRunner:
@@ -28,7 +34,11 @@ class StaticJudgeRunner:
         self._store = store or NullJudgeStore()
 
     async def run_tasks(
-        self, tasks: list[TaskRecord], *, persist: bool = True
+        self,
+        tasks: list[TaskRecord],
+        *,
+        persist: bool = True,
+        on_result: Callable[[StaticJudgeResult], None] | None = None,
     ) -> list[StaticJudgeResult]:
         results: list[StaticJudgeResult] = []
         for task in tasks:
@@ -36,6 +46,8 @@ class StaticJudgeRunner:
             if persist:
                 self._store.save_result(result)
             results.append(result)
+            if on_result is not None:
+                on_result(result)
         return results
 
     async def run_window(
@@ -95,3 +107,79 @@ def build_usecase_spec(
         rules=registry.get_consumer_prompt(usecase_id) or "",
         tools=tools,
     )
+
+
+def unjudged_tasks(
+    reader: TelemetryReader,
+    store: JudgeStore,
+    usecase_id: str,
+) -> list[TaskRecord]:
+    """Tasks of a use case not yet covered by the static judge (newest first)."""
+    done = store.judged_task_ids(usecase_id)
+    return [t for t in reader.load_tasks(usecase_id) if t.task_id not in done]
+
+
+async def run_usecase(
+    judge: StaticJudge,
+    registry: _RegistryLike,
+    reader: TelemetryReader,
+    usecase_id: str,
+    *,
+    store: JudgeStore | None = None,
+    skip_judged: bool = True,
+    persist: bool = True,
+    progress: ProgressFn | None = None,
+    on_error: Callable[[TaskRecord, Exception], None] | None = None,
+    max_concurrency: int = 6,
+) -> list[StaticJudgeResult]:
+    """Judge every task of a use case, across all its pipeline versions.
+
+    Each task is judged against the right version of the tool specs (a fresh
+    :class:`UseCaseSpec` per ``run_id``, built once and reused). With
+    ``skip_judged`` (default), already-judged tasks are left untouched, so the
+    pass is incremental and chains cleanly across iterations.
+
+    Tasks are judged **concurrently** — the static judge is stateless and each
+    task is an independent, network-bound LLM call, so up to ``max_concurrency``
+    are kept in flight at once (the bound protects against API rate limits).
+    Persistence is offloaded to a thread so DB writes never stall the loop. A
+    task that raises is isolated: it is reported via ``on_error`` and skipped,
+    the rest of the batch still completes. Returns the successful results.
+    """
+    store = store or NullJudgeStore()
+    tasks = reader.load_tasks(usecase_id)
+    if skip_judged:
+        done = store.judged_task_ids(usecase_id)
+        tasks = [t for t in tasks if t.task_id not in done]
+    if not tasks:
+        return []
+
+    # One spec per pipeline version, built once and shared by its tasks.
+    specs = {
+        run_id: build_usecase_spec(registry, usecase_id, run_id)
+        for run_id in {t.run_id for t in tasks}
+    }
+
+    sem = asyncio.Semaphore(max_concurrency)
+    total = len(tasks)
+    seen = 0
+
+    async def _judge_one(task: TaskRecord) -> StaticJudgeResult | None:
+        nonlocal seen
+        async with sem:
+            try:
+                result = await judge.judge_task(specs[task.run_id], task)
+                if persist:
+                    await asyncio.to_thread(store.save_result, result)
+            except Exception as exc:  # noqa: BLE001 - isolate one task's failure
+                if on_error is not None:
+                    on_error(task, exc)
+                return None
+        # No await between read and write: atomic in a single-threaded loop.
+        seen += 1
+        if progress is not None:
+            progress(seen, total)
+        return result
+
+    gathered = await asyncio.gather(*(_judge_one(t) for t in tasks))
+    return [r for r in gathered if r is not None]

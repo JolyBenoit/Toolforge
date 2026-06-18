@@ -141,8 +141,57 @@ class ConsumerAgent:
     def history(self) -> list[Message]:
         return self._agent.history
 
+    @property
+    def task_id(self) -> str | None:
+        return self._task_id
+
     def reset_history(self) -> None:
         self._agent.reset_history()
+
+    def new_session(self, *, task_id: str | None = None) -> str | None:
+        """Start a fresh task within the same run — a new telemetry line.
+
+        Resets the conversation history and all telemetry state, then assigns a
+        new ``task_id`` so the next ``run_task()`` opens a brand-new task record.
+        The run_id, usecase_id and MCP connection are kept, so this is a cheap
+        in-place refresh rather than a full relaunch.
+
+        Call ``close_session()`` first to finalise the previous line. Returns
+        the new task_id (or ``None`` when production telemetry is inactive).
+        """
+        self.reset_history()
+
+        # Reset telemetry state to constructor defaults.
+        self._task_opened = False
+        self._task_closed = False
+        self._task_started_at = None
+        self._user_turn = 0
+        self._llm_turn_index = 0
+        self._call_index_in_turn = 0
+        self._all_span_ids = []
+        self._dag_edges = []
+        self._prev_turn_tool_span_ids = []
+        self._current_turn_tool_span_ids = []
+        self._last_llm_span_id = None
+        self._pending_tool_starts = {}
+        self._pending_tool_data = {}
+        self._tool_meta_queue.clear()
+        self._llm_phase_started_at = None
+        self._in_llm_phase = False
+        self._agent_tokens_in = 0
+        self._agent_tokens_out = 0
+        self._tool_tokens_in = 0
+        self._tool_tokens_out = 0
+        self._tool_call_count = 0
+        self._task_ended_at = None
+        self._last_text_output = None
+        self._pending_user_wait_span = None
+        self._pending_feedback = None
+
+        # A new telemetry line only exists when production telemetry is wired.
+        if self._prod_store is not None:
+            self._task_id = task_id or secrets.token_hex(12)
+        return self._task_id
 
     # ------------------------------------------------------------------
     # Telemetry helpers

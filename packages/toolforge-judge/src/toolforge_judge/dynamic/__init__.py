@@ -13,7 +13,11 @@ Postgres.
 """
 from __future__ import annotations
 
-from .aggregate import aggregate_tool_notes
+from .aggregate import (
+    aggregate_tool_notes,
+    judge_scores_from_notes,
+    scores_from_global_notes,
+)
 from .judge import DynamicJudge
 from .models import (
     DynamicJudgeReport,
@@ -36,6 +40,8 @@ __all__ = [
     "ToolStability",
     "StructuralStability",
     "aggregate_tool_notes",
+    "judge_scores_from_notes",
+    "scores_from_global_notes",
     "compute_structural_stability",
     "DynamicJudgeStore",
     "NullDynamicJudgeStore",

@@ -160,6 +160,8 @@ class ConsumerScreen(Screen[None]):
         ("escape", "dismiss", "Back to selector"),
         ("f2", "mark_success", "✓ Succès"),
         ("f3", "mark_failure", "✗ Échec"),
+        ("f4", "new_session", "↻ Nouvelle session"),
+        ("f5", "open_judge", "⚖ Judge"),
     ]
 
     stream_text: reactive[str] = reactive("")
@@ -174,6 +176,9 @@ class ConsumerScreen(Screen[None]):
         outputs_dir: Path,
         uc_instructions: str | None = None,
         is_production: bool = False,
+        dsn: str = "",
+        config_path: Path | None = None,
+        data_root: Path | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
@@ -183,6 +188,9 @@ class ConsumerScreen(Screen[None]):
         self._outputs_dir = outputs_dir
         self._uc_instructions = uc_instructions
         self._is_production = is_production
+        self._dsn = dsn
+        self._config_path = config_path
+        self._data_root = data_root
         self._call_count = 0
         # Session verdict for telemetry; None until the user marks it.
         self._verdict_status: str | None = None
@@ -238,7 +246,19 @@ class ConsumerScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.title = "ToolForge Consumer"
-        self.sub_title = f"{self._usecase_id}  ·  {self._run_id}"
+        self._update_sub_title()
+        self._write_intro()
+        self.query_one(Input).focus()
+
+    def _update_sub_title(self) -> None:
+        sub = f"{self._usecase_id}  ·  {self._run_id}"
+        # Surface the active telemetry session so a new_session refresh is visible.
+        session_id = self._agent.task_id
+        if self._is_production and session_id:
+            sub += f"  ·  session {session_id[:8]}"
+        self.sub_title = sub
+
+    def _write_intro(self) -> None:
         log = self.query_one("#log", RichLog)
         log.write(
             f"[bold]Consumer[/]  use-case [cyan]{self._usecase_id}[/]"
@@ -262,10 +282,9 @@ class ConsumerScreen(Screen[None]):
             log.write(
                 "[blue]● Mode production[/] — la télémétrie de cette session est enregistrée.\n"
                 "When done, press [bold]F2[/] for ✓ success or [bold]F3[/] for ✗ failure "
-                "to record your verdict."
+                "to record your verdict, or [bold]F4[/] to start a new session."
             )
         log.write("Press [bold]Escape[/] to return.\n")
-        self.query_one(Input).focus()
 
     def watch_stream_text(self, text: str) -> None:
         self.query_one("#streaming", Label).update(
@@ -286,9 +305,25 @@ class ConsumerScreen(Screen[None]):
     # ------------------------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in ("mark_success", "mark_failure"):
+        if action in ("mark_success", "mark_failure", "new_session", "open_judge"):
             return True if self._is_production else None
         return True
+
+    def action_open_judge(self) -> None:
+        """Open the Judge metrics dashboard for the current production run."""
+        if not self._is_production:
+            return
+        from .judge import JudgeScreen
+
+        self.app.push_screen(
+            JudgeScreen(
+                usecase_id=self._usecase_id,
+                run_id=self._run_id,
+                dsn=self._dsn,
+                config_path=self._config_path,
+                data_root=self._data_root,
+            )
+        )
 
     def action_mark_success(self) -> None:
         if not self._is_production:
@@ -321,6 +356,46 @@ class ConsumerScreen(Screen[None]):
         if note:
             log.write(f"  [dim]note: {note}[/]")
         self.notify("Verdict enregistré : échec.", severity="warning", timeout=3)
+
+    def action_new_session(self) -> None:
+        """Finalise the current session and start a fresh one on the same run.
+
+        Closes the current telemetry line (with the user's verdict, or
+        ``user_aborted`` if none), then resets the agent and the screen so the
+        next task opens a brand-new line in the telemetry.
+        """
+        if not self._is_production:
+            return
+        if self.busy:
+            self.notify(
+                "Attendez la fin de la tâche en cours avant de changer de session.",
+                severity="warning",
+                timeout=3,
+            )
+            return
+
+        # Finalise the current line with whatever verdict was set (if any).
+        self._agent.close_session(status=self._verdict_status or "user_aborted")
+        self._agent.new_session()
+
+        # Reset per-session screen state.
+        self._verdict_status = None
+        self._call_count = 0
+
+        # Clear all panels and re-show the intro for the new session.
+        self.query_one("#log", RichLog).clear()
+        self.query_one("#calls-log", RichLog).clear()
+        self.query_one("#perf-log", RichLog).clear()
+        self._refresh_outputs()
+        self._update_sub_title()
+        self._write_intro()
+
+        self.query_one("#log", RichLog).write(
+            "[bold blue]↻ Nouvelle session démarrée[/] "
+            "[dim](nouvelle ligne de télémétrie)[/]\n"
+        )
+        self.query_one(Input).focus()
+        self.notify("Nouvelle session démarrée.", severity="information", timeout=3)
 
     def _refresh_outputs(self) -> None:
         lv = self.query_one("#outputs-list", ListView)

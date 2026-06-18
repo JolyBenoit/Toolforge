@@ -53,8 +53,7 @@ def _span_view(span: SpanRecord) -> dict[str, Any]:
         base.update(user_turn=span.user_turn, user_message=_trim(span.user_message))
     elif span.type == "llm_call":
         # The orchestrator's own turn — keep only its assistant text, trimmed.
-        resp = span.__dict__.get("response")
-        base.update(assistant=_trim(resp) if resp else None)
+        base.update(assistant=_trim(span.response) if span.response else None)
     return base
 
 

@@ -162,8 +162,16 @@ class PostgresProductionTelemetryStore(ProductionTelemetryStore):
         self._dsn = dsn
         self._ensure_schema()
 
+    # Keep this short: libpq applies it per resolved address (IPv4 + IPv6),
+    # so the worst-case wait is roughly 2× this value. A small value means an
+    # unreachable database degrades to "telemetry off" in a few seconds instead
+    # of stalling a run launch for ~20s.
+    _CONNECT_TIMEOUT_S = 3
+
     def _connect(self) -> "psycopg.Connection[Any]":
-        return psycopg.connect(self._dsn)  # type: ignore[return-value]
+        # Bound the connection attempt so an unreachable database fails fast
+        # with a clear error instead of hanging on the OS-level TCP timeout.
+        return psycopg.connect(self._dsn, connect_timeout=self._CONNECT_TIMEOUT_S)  # type: ignore[return-value]
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:

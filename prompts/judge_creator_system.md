@@ -9,6 +9,13 @@ You are given:
 - the **dynamic report** — the cross-run picture: mean structural stability and
   its per-tool breakdown, the breaching metrics over the window, and the
   dynamic judge's short global diagnosis;
+- the **architecture findings** (may be empty) — the architecture judge's
+  pipeline-level problems (over-simplification, coverage gaps, redundancy,
+  wiring/ordering, technical constraints), each with a proposed action that uses
+  this same vocabulary. **Structural** findings (e.g. a coverage gap or a wiring
+  problem) may name no single tool and appear ONLY here, not in the axes — so
+  read this list to catch them. Treat a proposed action as a strong suggestion,
+  not a command: still weigh it against the whole use case.
 - the **full pipeline** — the use case's utility and rules, and *every* tool's
   description and schema (not just the problematic ones).
 

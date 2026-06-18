@@ -11,6 +11,7 @@ dependencies = [
     "textual>=0.60.0",
     "toolforge-core",
     "toolforge-registry",
+    "toolforge-judge[postgres]",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,7 @@ dev = [
 [tool.uv.sources]
 toolforge-core = { workspace = true }
 toolforge-registry = { workspace = true }
+toolforge-judge = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

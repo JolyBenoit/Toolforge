@@ -5,12 +5,17 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from toolforge_core.llm.base import LLMRateLimitError
+from toolforge_core.types import TextDelta
 from toolforge_judge.metrics.data import SpanRecord, TaskRecord
 from toolforge_judge.static import (
+    AgentLLMJudge,
     StaticJudge,
     StaticJudgeRunner,
     ToolSpec,
     UseCaseSpec,
+    run_usecase,
+    unjudged_tasks,
 )
 from toolforge_judge.static.models import StaticJudgeResult
 from toolforge_judge.static.prompt import build_user_message, parse_result
@@ -107,6 +112,29 @@ def test_user_message_includes_rules_utility_and_telemetry():
     assert "budget" in msg
 
 
+def test_user_message_handles_user_wait_and_llm_call_spans():
+    # Regression: SpanRecord must expose user_turn/user_message/response so the
+    # prompt builder doesn't raise AttributeError on non-tool spans.
+    task = TaskRecord(
+        task_id="t9", run_id="run1", usecase_id="uc1", status="success",
+        started_at=_T0,
+        spans=[
+            SpanRecord(
+                span_id="u1", task_id="t9", run_id="run1", usecase_id="uc1",
+                type="user_wait", started_at=_T0,
+                user_turn=1, user_message="please book a trip",
+            ),
+            SpanRecord(
+                span_id="l1", task_id="t9", run_id="run1", usecase_id="uc1",
+                type="llm_call", started_at=_T0, response={"text": "on it"},
+            ),
+        ],
+    )
+    msg = build_user_message(_usecase(), task)
+    assert "please book a trip" in msg
+    assert "on it" in msg
+
+
 # --- parsing ---------------------------------------------------------------
 
 
@@ -149,6 +177,57 @@ def test_recommendations_only_present_when_needed():
     assert {n.tool_id for n in result.tool_notes} == {"search", "book"}
 
 
+# --- AgentLLMJudge rate-limit backoff --------------------------------------
+
+
+class _FlakyClient:
+    """An LLMClient that rejects the first ``fail_times`` calls with a 429."""
+
+    def __init__(self, fail_times: int, reply: str = '{"tool_notes": []}') -> None:
+        self.fail_times = fail_times
+        self.reply = reply
+        self.attempts = 0
+
+    async def stream(self, messages, *, system, tools, model, max_tokens, temperature):  # noqa: ANN001, ANN201
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            raise LLMRateLimitError("429: rate limit reached")
+        yield TextDelta(text=self.reply)
+
+
+def _agent_judge(client: _FlakyClient) -> AgentLLMJudge:
+    return AgentLLMJudge(
+        client=client, model="m", system_prompt="s", max_tokens=10, temperature=0.0,
+    )
+
+
+async def test_agent_llm_judge_retries_then_succeeds(monkeypatch):
+    # Neutralise the real backoff sleeps so the test is instant.
+    monkeypatch.setattr(
+        "toolforge_judge.static.llm.asyncio.sleep",
+        _instant_sleep,
+    )
+    client = _FlakyClient(fail_times=2)
+    out = await _agent_judge(client).complete("hi")
+    assert out == '{"tool_notes": []}'
+    assert client.attempts == 3  # two 429s, third succeeds
+
+
+async def test_agent_llm_judge_reraises_after_backoff_exhausted(monkeypatch):
+    monkeypatch.setattr(
+        "toolforge_judge.static.llm.asyncio.sleep",
+        _instant_sleep,
+    )
+    client = _FlakyClient(fail_times=99)
+    with pytest.raises(LLMRateLimitError):
+        await _agent_judge(client).complete("hi")
+    assert client.attempts == 6  # initial try + 5 backoff retries
+
+
+async def _instant_sleep(*_args, **_kwargs) -> None:
+    return None
+
+
 # --- judge + runner end to end (async) -------------------------------------
 
 
@@ -169,3 +248,126 @@ async def test_runner_persists_and_writes_back_contribution():
     # contribution write-back reaches the metric layer's column
     assert ("s1", "dead") in store.contribution_writes
     assert ("s2", "necessary") in store.contribution_writes
+
+
+# --- whole-use-case pass across pipeline versions --------------------------
+
+
+def _task_in(task_id: str, run_id: str) -> TaskRecord:
+    return TaskRecord(
+        task_id=task_id, run_id=run_id, usecase_id="uc1", status="success",
+        started_at=_T0, spans=[_tool_span(task_id, f"{task_id}s", "search")],
+    )
+
+
+class FakeReader:
+    """Minimal TelemetryReader stand-in: serves a fixed task list."""
+
+    def __init__(self, tasks: list[TaskRecord]) -> None:
+        self._tasks = tasks
+
+    def load_tasks(self, usecase_id, *, run_id=None, run_ids=None, limit=None):
+        return list(self._tasks)
+
+
+class FakeRegistry:
+    """Duck-typed registry: records which (usecase, run) specs were built."""
+
+    def __init__(self) -> None:
+        self.spec_runs: list[str] = []
+
+    def get_usecase(self, usecase_id):
+        return type("UC", (), {"prompt": "Book trips."})()
+
+    def get_active_tools(self, usecase_id, run_id):
+        self.spec_runs.append(run_id)
+        return [type("T", (), {"name": "search", "description": "search"})()]
+
+    def get_tool_schema(self, usecase_id, run_id, name):
+        return {"type": "object"}
+
+    def get_consumer_prompt(self, usecase_id):
+        return "Always confirm budget."
+
+
+async def test_run_usecase_spans_all_runs_and_reports_progress():
+    store = RecordingStore()
+    reader = FakeReader([
+        _task_in("t1", "runA"), _task_in("t2", "runA"), _task_in("t3", "runB"),
+    ])
+    registry = FakeRegistry()
+    seen: list[tuple[int, int]] = []
+
+    results = await run_usecase(
+        StaticJudge(FakeJudgeLLM(_GOOD_REPLY)), registry, reader, "uc1",
+        store=store, progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert len(results) == 3
+    assert len(store.saved) == 3
+    # a fresh spec was built per pipeline version, not per task
+    assert set(registry.spec_runs) == {"runA", "runB"}
+    # progress is cumulative across runs and ends at total
+    assert seen[-1] == (3, 3)
+    assert [d for d, _ in seen] == [1, 2, 3]
+
+
+async def test_run_usecase_isolates_a_failing_task():
+    class FlakyStore(RecordingStore):
+        def save_result(self, result):
+            if result.task_id == "t2":
+                raise RuntimeError("boom")
+            super().save_result(result)
+
+    store = FlakyStore()
+    reader = FakeReader([
+        _task_in("t1", "runA"), _task_in("t2", "runA"), _task_in("t3", "runB"),
+    ])
+    errors: list[tuple[str, str]] = []
+
+    results = await run_usecase(
+        StaticJudge(FakeJudgeLLM(_GOOD_REPLY)), FakeRegistry(), reader, "uc1",
+        store=store, on_error=lambda task, exc: errors.append((task.task_id, str(exc))),
+    )
+
+    # the failing task is skipped; the other two still succeed
+    assert {r.task_id for r in results} == {"t1", "t3"}
+    assert errors == [("t2", "boom")]
+
+
+async def test_run_usecase_respects_concurrency_bound():
+    import asyncio
+
+    inflight = 0
+    peak = 0
+
+    class CountingLLM(FakeJudgeLLM):
+        async def complete(self, user_message: str) -> str:
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0)  # let other coroutines pile up
+            inflight -= 1
+            return await super().complete(user_message)
+
+    reader = FakeReader([_task_in(f"t{i}", "runA") for i in range(10)])
+    await run_usecase(
+        StaticJudge(CountingLLM(_GOOD_REPLY)), FakeRegistry(), reader, "uc1",
+        store=RecordingStore(), max_concurrency=3,
+    )
+    assert 1 < peak <= 3  # bounded, but genuinely parallel
+
+
+async def test_run_usecase_skips_already_judged_tasks():
+    store = RecordingStore()
+    # pre-judge t1 so the incremental pass leaves it untouched
+    store.saved.append(parse_result(_task_in("t1", "runA"), "m", _GOOD_REPLY))
+    reader = FakeReader([_task_in("t1", "runA"), _task_in("t2", "runA")])
+
+    results = await run_usecase(
+        StaticJudge(FakeJudgeLLM(_GOOD_REPLY)), FakeRegistry(), reader, "uc1",
+        store=store,
+    )
+
+    assert {r.task_id for r in results} == {"t2"}
+    assert unjudged_tasks(reader, store, "uc1") == []  # t2 now recorded too

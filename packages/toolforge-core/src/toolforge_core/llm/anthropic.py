@@ -18,7 +18,7 @@ from toolforge_core.types import (
     MessageComplete,
     StreamEvent,
 )
-from .base import LLMClient
+from .base import LLMClient, LLMRateLimitError
 
 
 class AnthropicClient(LLMClient):
@@ -80,7 +80,15 @@ class AnthropicClient(LLMClient):
         input_tokens: int = 0
         output_tokens: int = 0
 
-        async with self._client.messages.stream(**kwargs) as stream:
+        # Enter the stream manually so a 429 on the initial request surfaces as a
+        # typed LLMRateLimitError (the callers retry on it); the try/finally then
+        # guarantees the stream is closed once iteration is done or interrupted.
+        stream_ctx = self._client.messages.stream(**kwargs)
+        try:
+            stream = await stream_ctx.__aenter__()
+        except anthropic.RateLimitError as exc:
+            raise LLMRateLimitError(f"Rate limit reached: {exc}") from exc
+        try:
             async for event in stream:
                 if event.type == "message_start":
                     if hasattr(event, "message") and hasattr(event.message, "usage"):
@@ -135,6 +143,8 @@ class AnthropicClient(LLMClient):
                         message=Message(role="assistant", content=sorted_content),
                         usage=usage,
                     )
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
 
 # --- format converters ---

@@ -57,6 +57,13 @@ class SpanRecord:
     retries: list[dict[str, Any]] = field(default_factory=list)
     nested_llm_calls: list[dict[str, Any]] = field(default_factory=list)
 
+    # llm_call
+    response: Any = None
+
+    # user_wait
+    user_turn: int | None = None
+    user_message: str | None = None
+
     # judge-filled (None until the backward pass runs)
     contribution: str | None = None
 
@@ -89,6 +96,9 @@ class SpanRecord:
             output=row.get("output"),
             retries=list(row.get("retries") or []),
             nested_llm_calls=list(row.get("nested_llm_calls") or []),
+            response=row.get("response"),
+            user_turn=row.get("user_turn"),
+            user_message=row.get("user_message"),
             contribution=row.get("contribution"),
         )
 
@@ -144,6 +154,30 @@ class TaskRecord:
 # ---------------------------------------------------------------------------
 
 
+def _selected_runs(
+    run_id: str | None, run_ids: list[str] | None
+) -> set[str] | None:
+    """Normalise the ``run_id`` / ``run_ids`` selection into a set (or None)."""
+    if run_ids:
+        return set(run_ids)
+    if run_id is not None:
+        return {run_id}
+    return None
+
+
+def _run_label(run_id: str | None, run_ids: list[str] | None) -> str | None:
+    """A stable identifier for a run selection (used as the report's key).
+
+    One version → its id; several → the sorted ids joined with ``+``; none →
+    None (the "all runs" slot).
+    """
+    selected = _selected_runs(run_id, run_ids)
+    if selected is None:
+        return None
+    ordered = sorted(selected)
+    return ordered[0] if len(ordered) == 1 else "+".join(ordered)
+
+
 @dataclass
 class MetricWindow:
     """A short and long slice of tasks for SPC-style comparison.
@@ -159,6 +193,14 @@ class MetricWindow:
     long: list[TaskRecord]
     env: MetricEnv
     run_id: str | None = None
+    run_ids: list[str] | None = None
+    # Judge-supplied per-tool scores, attached after construction by the caller
+    # that has the judge notes (TUI / dynamic judge). ``judge_scores`` maps
+    # ``(tool_id, score_key)`` → ``(mean_value, n)``; ``judged_tools`` is every
+    # tool the judge has assessed (so a scored-but-valueless metric can still be
+    # reported as evaluated rather than pending). Both ``None`` = no judge pass.
+    judge_scores: dict[tuple[str, str], tuple[float, int]] | None = None
+    judged_tools: set[str] | None = None
 
     @property
     def tool_ids(self) -> list[str]:
@@ -178,19 +220,32 @@ class MetricWindow:
         env: MetricEnv,
         *,
         run_id: str | None = None,
+        run_ids: list[str] | None = None,
     ) -> MetricWindow:
         """Slice an ordered (or unordered) task list into short/long windows.
 
-        If ``run_id`` is given, the long window is restricted to that pipeline
-        version; otherwise it slides over the latest ``env.long_window`` tasks.
+        The long window is restricted to a chosen set of pipeline versions:
+        ``run_ids`` selects several versions at once, ``run_id`` a single one
+        (a convenience for the common case). With neither, it slides over the
+        latest ``env.long_window`` tasks across every version. ``run_id`` then
+        carries a stable label for the selection (the lone id, or the joined
+        set) so a re-run over the same versions overwrites its stored report.
         """
+        selected = _selected_runs(run_id, run_ids)
         ordered = sorted(tasks, key=lambda t: t.started_at, reverse=True)
-        if run_id is not None:
-            long = [t for t in ordered if t.run_id == run_id][: env.long_window]
+        if selected is not None:
+            long = [t for t in ordered if t.run_id in selected][: env.long_window]
         else:
             long = ordered[: env.long_window]
         short = long[: env.short_window]
-        return cls(usecase_id=usecase_id, short=short, long=long, env=env, run_id=run_id)
+        return cls(
+            usecase_id=usecase_id,
+            short=short,
+            long=long,
+            env=env,
+            run_id=_run_label(run_id, run_ids),
+            run_ids=sorted(selected) if selected is not None else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -225,12 +280,20 @@ class TelemetryReader:
         usecase_id: str,
         *,
         run_id: str | None = None,
+        run_ids: list[str] | None = None,
         limit: int | None = None,
     ) -> list[TaskRecord]:
-        """Load tasks (newest first) with their spans for a use case."""
+        """Load tasks (newest first) with their spans for a use case.
+
+        ``run_ids`` restricts to a set of pipeline versions; ``run_id`` to a
+        single one (a convenience). With neither, every version is included.
+        """
         params: list[Any] = [usecase_id]
         sql = "SELECT * FROM tf_prod_tasks WHERE usecase_id = %s"
-        if run_id is not None:
+        if run_ids:
+            sql += " AND run_id = ANY(%s)"
+            params.append(list(run_ids))
+        elif run_id is not None:
             sql += " AND run_id = %s"
             params.append(run_id)
         sql += " ORDER BY started_at DESC"
@@ -259,10 +322,52 @@ class TelemetryReader:
         env: MetricEnv,
         *,
         run_id: str | None = None,
+        run_ids: list[str] | None = None,
     ) -> MetricWindow:
         """Load enough tasks to populate the short and long windows."""
-        tasks = self.load_tasks(usecase_id, run_id=run_id, limit=env.long_window)
-        return MetricWindow.from_tasks(usecase_id, tasks, env, run_id=run_id)
+        tasks = self.load_tasks(
+            usecase_id, run_id=run_id, run_ids=run_ids, limit=env.long_window
+        )
+        return MetricWindow.from_tasks(
+            usecase_id, tasks, env, run_id=run_id, run_ids=run_ids
+        )
+
+    def count_by_status(
+        self,
+        usecase_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> dict[str, int]:
+        """Count *all* recorded tasks grouped by status (not window-capped).
+
+        Unlike :meth:`load_window`, this scans the whole history so the TUI can
+        report the true total number of runs / successes / failures, not just
+        the last ``long_window`` tasks.
+        """
+        params: list[Any] = [usecase_id]
+        sql = "SELECT status, COUNT(*) AS n FROM tf_prod_tasks WHERE usecase_id = %s"
+        if run_id is not None:
+            sql += " AND run_id = %s"
+            params.append(run_id)
+        sql += " GROUP BY status"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return {r["status"]: int(r["n"]) for r in rows}
+
+    def count_tasks_by_run(self, usecase_id: str) -> list[tuple[str, int]]:
+        """List the pipeline versions of a use case with their task counts.
+
+        Ordered most-recent-first (by latest task), so the TUI can offer the
+        set of runs to feed the dynamic judge.
+        """
+        sql = (
+            "SELECT run_id, COUNT(*) AS n, MAX(started_at) AS last "
+            "FROM tf_prod_tasks WHERE usecase_id = %s "
+            "GROUP BY run_id ORDER BY last DESC"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, [usecase_id]).fetchall()
+        return [(r["run_id"], int(r["n"])) for r in rows]
 
 
 def _dict_row() -> Any:

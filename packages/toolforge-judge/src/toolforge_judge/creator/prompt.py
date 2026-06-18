@@ -54,12 +54,19 @@ def build_axes_message(
     tool_id: str,
     breaches: list[dict[str, Any]],
     global_note: ToolGlobalNote | None,
+    arch_findings: list[Any] | None = None,
 ) -> str:
-    """Serialise one tool's breaches + run/run comments for the stage-1 pass."""
+    """Serialise one tool's breaches + run/run comments for the stage-1 pass.
+
+    ``arch_findings`` are the architecture judge's findings naming this tool —
+    design-level problems (e.g. an over-simplification) that may have no metric
+    breach behind them, so the axes can speak to them too.
+    """
     payload = {
         "tool_id": tool_id,
         "breaching_metrics": breaches,
         "run_over_run_comments": global_note.to_dict() if global_note else None,
+        "architecture_findings": [f.to_dict() for f in arch_findings or []] or None,
     }
     return (
         "Synthesise the improvement axes for this single tool from its breaching "
@@ -70,12 +77,15 @@ def build_axes_message(
 
 
 def axes_evidence(
-    breaches: list[dict[str, Any]], global_note: ToolGlobalNote | None
+    breaches: list[dict[str, Any]],
+    global_note: ToolGlobalNote | None,
+    arch_findings: list[Any] | None = None,
 ) -> dict[str, Any]:
     """The raw material a stage-1 synthesis was grounded on (kept for audit)."""
     return {
         "breaching_metrics": breaches,
         "run_over_run_comments": global_note.to_dict() if global_note else None,
+        "architecture_findings": [f.to_dict() for f in arch_findings or []],
     }
 
 
@@ -121,16 +131,21 @@ def build_instructions_message(
     tool_axes: list[ToolImprovementAxes],
     dynamic_report: DynamicJudgeReport,
     usecase: UseCaseSpec,
+    arch_findings: list[Any] | None = None,
 ) -> str:
     """Serialise the stage-1 axes + dynamic picture + the *full* pipeline.
 
     The full tool catalogue (not just the problematic tools) is included on
     purpose: a corrective instruction must account for the whole use case so it
-    neither breaks the pipeline nor introduces redundancy.
+    neither breaks the pipeline nor introduces redundancy. ``arch_findings``
+    carry the architecture judge's pipeline-level findings — including the
+    *structural* ones (coverage gaps, wiring) that name no single tool and so
+    reach stage 2 only here.
     """
     payload = {
         "tool_improvement_axes": [a.to_dict() for a in tool_axes],
         "dynamic_report": _dynamic_view(dynamic_report),
+        "architecture_findings": [f.to_dict() for f in arch_findings or []] or None,
         "pipeline": _usecase_view(usecase),
     }
     return (

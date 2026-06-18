@@ -1,6 +1,7 @@
 """Selector screen — browse use cases and runs, launch creator or consumer."""
 from __future__ import annotations
 
+import asyncio
 import secrets
 import sys
 from dataclasses import dataclass
@@ -113,7 +114,7 @@ class _SelectorCommands(Provider):
                     ),
                     (
                         f"Validate run  [{run_id}]",
-                        "Lock this run as immutable so it can be used by Consumer",
+                        "Freeze this run's tools (human validation gate) so it can be tested in Consumer",
                         screen.action_validate_run,
                     ),
                 ]
@@ -126,7 +127,7 @@ class _SelectorCommands(Provider):
                     ),
                     (
                         f"Promote to production  [{run_id}]",
-                        "Lock as a production pipeline (records a snapshot) and open Consumer with telemetry",
+                        "Start recording Consumer runs for the Judge (pins the current tool versions)",
                         screen.action_promote_to_production,
                     ),
                     (
@@ -146,6 +147,11 @@ class _SelectorCommands(Provider):
                         f"Open Consumer  [{run_id}]  [production]",
                         "Run a task against this production pipeline (telemetry recorded)",
                         screen.action_open_consumer,
+                    ),
+                    (
+                        f"Open Judge  [{run_id}]",
+                        "Inspect telemetry-backed metrics (run counts, reliability, …) for this production run",
+                        screen.action_open_judge,
                     ),
                     (
                         f"Fork run  [{run_id}]",
@@ -200,6 +206,7 @@ class SelectorScreen(Screen[None]):
         ("f", "fork_run", "Fork"),
         ("e", "edit_run", "Edit"),
         ("r", "run", "Run"),
+        ("j", "open_judge", "Judge"),
         ("ctrl+r", "refresh", "Refresh"),
         ("ctrl+c", "app.quit", "Quit"),
     ]
@@ -314,6 +321,8 @@ class SelectorScreen(Screen[None]):
             return True if status == "validated" else None
         if action == "fork_run":
             return True if status in ("validated", "in_production") else None
+        if action == "open_judge":
+            return True if status == "in_production" else None
         if action == "edit_run":
             return True if status in ("draft", "validated") else None
         return True
@@ -353,8 +362,10 @@ class SelectorScreen(Screen[None]):
         self.app.push_screen(
             _ConfirmScreen(
                 f"Promote [bold cyan]{sel.run.run_id}[/] to [blue]production[/]?\n\n"
-                "An immutable pipeline snapshot is recorded and the run is opened "
-                "in Consumer with [blue]telemetry enabled[/]."
+                "From now on, Consumer runs are [blue]recorded for the Judge[/]. "
+                "The current tool versions are pinned so scores stay attributable.\n\n"
+                "[dim]Validated runs are pre-production: they can be tested in Consumer "
+                "but their telemetry is not persisted.[/]"
             ),
             callback=lambda confirmed: self._on_promote_confirmed(sel, confirmed),
         )
@@ -362,42 +373,58 @@ class SelectorScreen(Screen[None]):
     def _on_promote_confirmed(self, sel: _RunData, confirmed: bool) -> None:
         if not confirmed:
             return
+        self._promote_run(sel)
+
+    @work
+    async def _promote_run(self, sel: _RunData) -> None:
+        """Promote the run and pin its pipeline spec off the UI thread.
+
+        The DB work (``promote_run_to_production`` writes to disk, the pipeline
+        spec opens a Postgres connection) is offloaded with ``to_thread`` so a
+        slow or unreachable database can never freeze the TUI event loop.
+        """
         try:
-            self._registry.promote_run_to_production(sel.usecase_id, sel.run.run_id)
+            await asyncio.to_thread(
+                self._registry.promote_run_to_production, sel.usecase_id, sel.run.run_id
+            )
         except Exception as exc:  # noqa: BLE001
             self.notify(str(exc), severity="error")
             return
-        self._record_pipeline_spec(sel.usecase_id, sel.run.run_id)
+        await self._record_pipeline_spec(sel.usecase_id, sel.run.run_id)
         self._populate_tree()
         self.notify(f"{sel.run.run_id!r} promoted to production.", severity="information")
         self._launch_consumer(sel.usecase_id, sel.run.run_id, "in_production")
 
-    def _record_pipeline_spec(self, usecase_id: str, run_id: str) -> None:
+    async def _record_pipeline_spec(self, usecase_id: str, run_id: str) -> None:
         """Persist the immutable pipeline snapshot if a Postgres DSN is set."""
         from toolforge_core import load_config
 
         try:
             config = load_config(self._config_path)
         except Exception as exc:  # noqa: BLE001
-            self.notify(f"Pipeline snapshot not recorded: {exc}", severity="warning", timeout=6)
+            self.notify(f"Pipeline version not pinned: {exc}", severity="warning", timeout=6)
             return
         dsn = config.telemetry.dsn
         if not dsn:
             self.notify(
-                "No DSN configured — pipeline snapshot not recorded. "
+                "No DSN configured — pipeline version not pinned and runs won't be recorded. "
                 "Set [telemetry] dsn = … in toolforge.toml to enable production telemetry.",
                 severity="warning",
                 timeout=6,
             )
             return
-        try:
+
+        def _persist() -> None:
             from toolforge_telemetry.production import build_pipeline_spec, get_production_store
 
             store = get_production_store(dsn)
             spec = build_pipeline_spec(self._registry, usecase_id, run_id)
             store.record_pipeline_spec(spec)
+
+        try:
+            await asyncio.to_thread(_persist)
         except Exception as exc:  # noqa: BLE001
-            self.notify(f"Pipeline snapshot not recorded: {exc}", severity="warning", timeout=6)
+            self.notify(f"Pipeline version not pinned: {exc}", severity="warning", timeout=6)
 
     def action_fork_run(self) -> None:
         sel = self._selected_run()
@@ -480,6 +507,33 @@ class SelectorScreen(Screen[None]):
             return
         self._launch_consumer(sel.usecase_id, sel.run.run_id, sel.run.status)
 
+    def action_open_judge(self) -> None:
+        sel = self._selected_run()
+        if sel is None:
+            self.notify("Select a run first.", severity="warning")
+            return
+        if sel.run.status != "in_production":
+            self.notify("The Judge is only available for production runs.", severity="warning")
+            return
+        from toolforge_core import load_config
+
+        from .judge import JudgeScreen
+
+        try:
+            config = load_config(self._config_path)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not open Judge: {exc}", severity="error")
+            return
+        self.app.push_screen(
+            JudgeScreen(
+                usecase_id=sel.usecase_id,
+                run_id=sel.run.run_id,
+                dsn=config.telemetry.dsn,
+                config_path=self._config_path,
+                data_root=self._data_root,
+            )
+        )
+
     def action_run(self) -> None:
         sel = self._selected_run()
         if sel is None:
@@ -554,12 +608,12 @@ class SelectorScreen(Screen[None]):
             # Wire production telemetry for in_production runs.
             prod_store = None
             task_id: str | None = None
+            dsn = config.telemetry.dsn if config.telemetry.dsn else ""
             if run_status == "in_production":
-                dsn = config.telemetry.dsn if config.telemetry.dsn else ""
                 if dsn:
                     try:
                         from toolforge_telemetry.production import get_production_store
-                        prod_store = get_production_store(dsn)
+                        prod_store = await asyncio.to_thread(get_production_store, dsn)
                     except Exception as exc:  # noqa: BLE001
                         self.notify(
                             f"Production telemetry unavailable: {exc}",
@@ -601,6 +655,9 @@ class SelectorScreen(Screen[None]):
                         outputs_dir=self._registry.outputs_dir(usecase_id),
                         uc_instructions=uc_instructions,
                         is_production=(run_status == "in_production"),
+                        dsn=dsn,
+                        config_path=self._config_path,
+                        data_root=self._data_root,
                     )
                 )
         except Exception as exc:  # noqa: BLE001

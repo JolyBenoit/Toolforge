@@ -21,13 +21,20 @@ from .models import (
     ToolSpec,
     UseCaseSpec,
 )
-from .runner import StaticJudgeRunner, build_usecase_spec
+from .runner import (
+    StaticJudgeRunner,
+    build_usecase_spec,
+    run_usecase,
+    unjudged_tasks,
+)
 from .store import JudgeStore, NullJudgeStore, ToolNoteRecord, get_judge_store
 
 __all__ = [
     "StaticJudge",
     "StaticJudgeRunner",
     "build_usecase_spec",
+    "run_usecase",
+    "unjudged_tasks",
     "JudgeLLM",
     "AgentLLMJudge",
     "SpanVerdict",

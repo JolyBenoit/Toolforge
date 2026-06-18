@@ -22,6 +22,7 @@ from .config import (
     SandboxConfig,
     TelemetryConfig,
     TUIConfig,
+    JudgeConfig,
     load_config,
     load_system_prompt,
 )
@@ -36,7 +37,7 @@ __all__ = [
     "TextDelta", "ToolCallStart", "ToolCallInputDelta", "ToolCallComplete",
     "ToolResultEvent", "MessageComplete", "StreamEvent",
     "Config", "AgentLLMConfig", "LLMConfig", "ProviderConfig", "MCPEndpointConfig",
-    "MCPConfig", "SandboxConfig", "TelemetryConfig", "TUIConfig",
+    "MCPConfig", "SandboxConfig", "TelemetryConfig", "TUIConfig", "JudgeConfig",
     "load_config", "load_system_prompt",
     "LLMAgent", "ToolHandler",
     "LLMClient", "AnthropicClient", "OpenAICompatClient", "create_client",

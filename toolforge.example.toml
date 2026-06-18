@@ -8,6 +8,8 @@
 
 [llm.providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"   # name of the environment variable
+# timeout   = 120.0                 # per-request timeout (s); also caps nested
+                                    # LLM calls made inside sandboxed tools
 
 # Uncomment for OpenAI-compatible providers (Z.ai, OpenRouter, vLLM …)
 # [llm.providers.zai]
@@ -63,6 +65,10 @@ system_prompt_file = "prompts/judge_static_system.md"
 
 [sandbox]
 timeout_seconds = 30
+# mode            = "uv"            # "uv" (local) | "docker" (isolated container)
+# persistent_venv = true            # uv mode: build one venv per run instead of
+                                    # rebuilding an isolated env on every tool call
+                                    # (~12× faster validated/in_production calls)
 
 # ---------------------------------------------------------------------------
 # Telemetry  (optional OpenTelemetry export)
@@ -71,6 +77,17 @@ timeout_seconds = 30
 [telemetry]
 otel_enabled  = false
 otel_endpoint = ""   # e.g. "http://localhost:4318"
+# dsn         = ""   # Postgres DSN for in_production telemetry + the Judges
+
+# ---------------------------------------------------------------------------
+# Judge  (run settings — distinct from the [llm.judge] model section above)
+# ---------------------------------------------------------------------------
+
+[judge]
+# How many tasks the static judge evaluates at once. Each task is one stateless,
+# network-bound LLM call, so this bounds in-flight requests: raise it to judge a
+# large backlog faster, lower it to stay under your provider's rate limit.
+max_concurrency = 6
 
 # ---------------------------------------------------------------------------
 # TUI

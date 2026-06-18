@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from toolforge_core.config import ProviderConfig
-from .base import LLMClient
+from .base import LLMClient, LLMRateLimitError
 from .anthropic import AnthropicClient
 from .openai_compat import OpenAICompatClient
 
-__all__ = ["LLMClient", "AnthropicClient", "OpenAICompatClient", "create_client"]
+__all__ = [
+    "LLMClient",
+    "LLMRateLimitError",
+    "AnthropicClient",
+    "OpenAICompatClient",
+    "create_client",
+]
 
 
 def create_client(provider: str, config: ProviderConfig) -> LLMClient:

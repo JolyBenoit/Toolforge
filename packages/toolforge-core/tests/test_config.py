@@ -116,3 +116,15 @@ def test_load_no_llm_tools_is_empty_dict(tmp_path: Path) -> None:
 def test_system_prompt_path_is_absolute(config_file: Path) -> None:
     cfg = load_config(config_file)
     assert cfg.llm.creator.system_prompt_file.is_absolute()
+
+
+def test_judge_max_concurrency_defaults_to_6(config_file: Path) -> None:
+    cfg = load_config(config_file)
+    assert cfg.judge.max_concurrency == 6
+
+
+def test_judge_max_concurrency_override(tmp_path: Path) -> None:
+    f = tmp_path / "config.toml"
+    f.write_text(MINIMAL_TOML + "\n[judge]\nmax_concurrency = 12\n", encoding="utf-8")
+    cfg = load_config(f)
+    assert cfg.judge.max_concurrency == 12

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from toolforge_judge.architecture.models import (
+    ArchitectureFinding,
+    ArchitectureJudgeReport,
+)
 from toolforge_judge.creator import CreatorInstruction, CreatorJudge
 from toolforge_judge.creator.judge import problematic_tools
 from toolforge_judge.creator.prompt import parse_instructions
@@ -182,3 +186,79 @@ def test_instruction_id_is_stable_and_content_addressed():
     assert a.instruction_id == b.instruction_id
     c = CreatorInstruction(action="remove_tool", target_tools=["a"], body="do x")
     assert c.instruction_id != a.instruction_id
+
+
+# --- architecture-judge integration ---------------------------------------
+
+
+def _arch_report(*findings) -> ArchitectureJudgeReport:
+    return ArchitectureJudgeReport(
+        usecase_id="uc1", run_id="run1", computed_at=_NOW, findings=list(findings),
+    )
+
+
+def _healthy_report() -> DynamicJudgeReport:
+    """No metric breaches, no note breaches — nothing for the creator alone."""
+    return _report(
+        metric_values=[MetricValue("error_rate", "reliability", "tool", "short",
+                                   0.0, 5, breached=False, tool_id="search")],
+        global_notes=[ToolGlobalNote(tool_id="search", n_tasks=10, breaches=[])],
+    )
+
+
+def test_architecture_finding_makes_a_clean_tool_problematic():
+    # 'book' has no breach anywhere, but an architecture finding names it.
+    arch = _arch_report(
+        ArchitectureFinding(
+            category="over_simplification", severity="error",
+            tools_involved=["book"], requirement_threatened="full itinerary",
+            body="book truncates the result to 1 option", proposed_action="split_tool",
+        )
+    )
+    assert problematic_tools(_healthy_report(), arch) == ["book"]
+
+
+async def test_assess_acts_on_architecture_only_problem():
+    """A design problem with no metric breach still yields axes + instructions."""
+    arch = _arch_report(
+        ArchitectureFinding(
+            category="over_simplification", severity="error",
+            tools_involved=["book"], requirement_threatened="full itinerary",
+            body="book truncates the result to 1 option", proposed_action="split_tool",
+        )
+    )
+    axes_llm = FakeAxesLLM()
+    instr_llm = FakeInstructionLLM(
+        '{"instructions": [{"action": "modify_implementation",'
+        ' "target_tools": ["book"], "body": "return all options"}]}'
+    )
+    judge = CreatorJudge(axes_llm=axes_llm, instruction_llm=instr_llm)
+    result = await judge.assess(_healthy_report(), _usecase(), arch)
+
+    assert [a.tool_id for a in result.tool_axes] == ["book"]
+    # the finding reached both stages
+    assert "architecture_findings" in axes_llm.calls[0]
+    assert "book truncates" in axes_llm.calls[0]
+    assert "architecture_findings" in instr_llm.calls[0]
+    assert len(result.instructions) == 1
+
+
+async def test_structural_finding_with_no_tool_still_reaches_stage_2():
+    """A coverage gap names no tool: no axes, but stage 2 must still run."""
+    arch = _arch_report(
+        ArchitectureFinding(
+            category="coverage_gap", severity="error", tools_involved=[],
+            requirement_threatened="fetching the source PDF",
+            body="no tool can fetch the document", proposed_action="create_tool",
+        )
+    )
+    instr_llm = FakeInstructionLLM(
+        '{"instructions": [{"action": "create_tool", "target_tools": [],'
+        ' "body": "add a pdf_fetch tool"}]}'
+    )
+    judge = CreatorJudge(axes_llm=FakeAxesLLM(), instruction_llm=instr_llm)
+    result = await judge.assess(_healthy_report(), _usecase(), arch)
+
+    assert result.tool_axes == []          # no tool to raise an axis on
+    assert len(instr_llm.calls) == 1       # stage 2 still ran
+    assert result.instructions[0].action == "create_tool"

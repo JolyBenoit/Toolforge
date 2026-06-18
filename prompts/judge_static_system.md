@@ -48,13 +48,22 @@ tool across its calls in THIS task:
 ```
 {"tool_id": "<id>",
  "scores": {
-    "selection_precision": 0.0-1.0,   // were this tool's calls appropriate
-    "param_extraction": 0.0-1.0,      // were params faithfully extracted
-    "output_quality": 0.0-1.0         // was its output correct / useful
+    "selection_precision": 0.0-1.0,   // 1 = this tool's calls were appropriate
+    "param_extraction": 0.0-1.0,      // 1 = params faithfully extracted
+    "output_quality": 0.0-1.0,        // 1 = its output was correct / useful
+    "downstream_correction": 0.0-1.0, // fraction a later step had to correct or
+                                      // ignore (0 = used as-is, 1 = always fixed)
+    "output_schema_drift": 0.0-1.0    // fraction of outputs that did NOT conform
+                                      // to the declared output schema (0 = all ok)
  },
  "recommendation": null | "<text>",
  "recommendation_target": "none|implementation|description|usage"}
 ```
+
+Mind the polarity: for `selection_precision`, `param_extraction` and
+`output_quality`, **higher is better** (1 = healthy). For `downstream_correction`
+and `output_schema_drift`, they are **rates of trouble**, so **lower is better**
+(0 = healthy). Always include all five keys.
 
 ## Writing recommendations — ONLY when necessary
 

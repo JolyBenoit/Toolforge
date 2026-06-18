@@ -193,6 +193,65 @@ def test_reset_history(mock_session: AsyncMock) -> None:
     assert inner.history == []
 
 
+# --- ConsumerAgent.new_session ---
+
+
+def test_new_session_assigns_new_task_id_and_resets_state(
+    mock_session: AsyncMock,
+) -> None:
+    store = _FakeProdStore()
+    agent = _prod_agent(mock_session, store)
+    assert agent.task_id == "task_1"
+
+    # Simulate an active task with accumulated state.
+    agent._task_opened = True
+    agent._task_closed = True
+    agent._user_turn = 3
+    agent._all_span_ids = ["sp_a", "sp_b"]
+    agent._agent_tokens_in = 100
+    agent.history.append(MagicMock())
+
+    new_id = agent.new_session()
+
+    assert new_id is not None
+    assert new_id != "task_1"
+    assert agent.task_id == new_id
+    # State fully reset for the new line.
+    assert agent._task_opened is False
+    assert agent._task_closed is False
+    assert agent._user_turn == 0
+    assert agent._all_span_ids == []
+    assert agent._agent_tokens_in == 0
+    assert agent.history == []
+
+
+def test_new_session_without_prod_store_keeps_task_id_none(
+    mock_session: AsyncMock,
+) -> None:
+    agent = ConsumerAgent(agent=_MockLLMAgent(), provider=MCPToolProvider(mock_session))
+    agent.history.append(MagicMock())
+    assert agent.new_session() is None
+    assert agent.task_id is None
+    assert agent.history == []
+
+
+def test_close_then_new_session_opens_a_distinct_line(
+    mock_session: AsyncMock,
+) -> None:
+    store = _FakeProdStore()
+    agent = _prod_agent(mock_session, store)
+    agent._task_opened = True
+    agent._task_started_at = "2026-01-01T00:00:00+00:00"
+
+    agent.close_session(status="success")
+    first_id = agent.task_id
+    agent.new_session()
+
+    assert store.closed == ["success"]
+    assert agent.task_id != first_id
+    assert agent._task_closed is False  # rearmed for the next run_task()
+
+
 # --- multi-turn accumulates history ---
 
 

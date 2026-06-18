@@ -70,6 +70,9 @@ class SandboxConfig:
     timeout_seconds: int
     mode: str = "uv"
     image: str = "toolforge-sandbox:latest"
+    # uv mode: build one persistent venv per run instead of an isolated env per
+    # call. Makes validated/in_production tool calls fast and stable across a run.
+    persistent_venv: bool = True
 
 
 @dataclass
@@ -86,12 +89,22 @@ class TUIConfig:
 
 
 @dataclass
+class JudgeConfig:
+    # Max number of tasks the static judge evaluates concurrently. The static
+    # judge is network-bound (one stateless LLM call per task), so this bounds
+    # in-flight LLM requests — raise it to go faster, lower it to stay under an
+    # API's rate limit.
+    max_concurrency: int = 6
+
+
+@dataclass
 class Config:
     llm: LLMConfig
     mcp: MCPConfig
     sandbox: SandboxConfig
     telemetry: TelemetryConfig
     tui: TUIConfig
+    judge: JudgeConfig
 
 
 def load_config(path: Path) -> Config:
@@ -120,6 +133,7 @@ def resolve_llm_tool_configs(config: Config) -> dict[str, dict[str, Any]]:
             "temperature": tool_cfg.temperature,
             "api_key": provider.resolve_api_key(),
             "base_url": provider.base_url,
+            "timeout": provider.timeout,
         }
     return result
 
@@ -189,6 +203,7 @@ def _parse_config(data: dict[str, Any], config_dir: Path) -> Config:
         timeout_seconds=int(sb.get("timeout_seconds", 30)),
         mode=sb.get("mode", "uv"),
         image=sb.get("image", "toolforge-sandbox:latest"),
+        persistent_venv=bool(sb.get("persistent_venv", True)),
     )
 
     tel = data.get("telemetry", {})
@@ -204,4 +219,10 @@ def _parse_config(data: dict[str, Any], config_dir: Path) -> Config:
         log_level=tui_d.get("log_level", "INFO"),
     )
 
-    return Config(llm=llm, mcp=mcp, sandbox=sandbox, telemetry=telemetry, tui=tui)
+    judge_d = data.get("judge", {})
+    judge_cfg = JudgeConfig(max_concurrency=int(judge_d.get("max_concurrency", 6)))
+
+    return Config(
+        llm=llm, mcp=mcp, sandbox=sandbox, telemetry=telemetry, tui=tui,
+        judge=judge_cfg,
+    )

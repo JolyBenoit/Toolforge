@@ -19,7 +19,7 @@ from toolforge_core.types import (
     MessageComplete,
     StreamEvent,
 )
-from .base import LLMClient
+from .base import LLMClient, LLMRateLimitError
 
 
 class OpenAICompatClient(LLMClient):
@@ -96,7 +96,7 @@ class OpenAICompatClient(LLMClient):
         except openai.APIConnectionError as exc:
             raise ConnectionError(f"Could not reach LLM API: {exc}") from exc
         except openai.RateLimitError as exc:
-            raise RuntimeError(f"Rate limit reached: {exc}") from exc
+            raise LLMRateLimitError(f"Rate limit reached: {exc}") from exc
 
         try:
             async for chunk in response:

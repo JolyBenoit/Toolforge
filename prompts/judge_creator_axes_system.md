@@ -8,7 +8,12 @@ You are given, for a single tool:
   the window (name, family, window, value, sample size, and detail);
 - its **run-over-run comments** — the static judge's per-tool notes averaged
   across runs (mean scores, recommendation rate, dominant recommendation
-  target, sample recommendations, and any breached score floors).
+  target, sample recommendations, and any breached score floors);
+- its **architecture findings** (may be empty) — the architecture judge's
+  design-level problems naming this tool (category, severity, the use-case
+  requirement threatened, evidence, and a proposed action). These can exist with
+  NO metric breach behind them — e.g. a handler that silently truncates its
+  output — so treat them as first-class evidence, not a footnote.
 
 ## What to produce
 

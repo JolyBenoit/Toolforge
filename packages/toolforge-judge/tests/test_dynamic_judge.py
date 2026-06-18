@@ -61,6 +61,29 @@ def test_aggregate_means_and_recommendation_rate():
     assert notes["book"].recommendation_rate == 0.0
 
 
+def test_aggregate_breaches_respect_trouble_rate_direction():
+    """downstream_correction / output_schema_drift breach when the mean rises
+    *above* the ceiling — the opposite direction of precision-like scores."""
+    env = MetricEnv(
+        downstream_correction_rate_abs=0.25,
+        output_schema_drift_abs=0.05,
+        node_assertion_pass_min=0.95,
+    )
+    records = [
+        # bad tool: high trouble rates, healthy pass rate
+        _note("t1", "bad", {"downstream_correction": 0.6,
+                            "output_schema_drift": 0.4,
+                            "output_quality": 1.0}),
+        # good tool: low trouble rates
+        _note("t1", "good", {"downstream_correction": 0.0,
+                             "output_schema_drift": 0.0,
+                             "output_quality": 1.0}),
+    ]
+    notes = {n.tool_id: n for n in aggregate_tool_notes(records, env)}
+    assert set(notes["bad"].breaches) == {"downstream_correction", "output_schema_drift"}
+    assert notes["good"].breaches == []
+
+
 # --- structural stability --------------------------------------------------
 
 
@@ -116,6 +139,10 @@ async def test_assess_builds_full_report_without_llm():
     assert report.structural_stability.mean_structural_stability is not None
     assert report.diagnosis is None                       # no LLM provided
     assert isinstance(report.to_dict()["structural_stability"], dict)
+    # the judge score is folded back into the metric report (no longer pending)
+    sp = report.metric_report.get("selection_precision", "search")
+    assert sp is not None and sp.status == "ok"
+    assert sp.value == pytest.approx(0.9)
 
 
 async def test_assess_with_llm_writes_diagnosis():

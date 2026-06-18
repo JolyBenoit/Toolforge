@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from toolforge_registry import Registry
@@ -48,6 +49,18 @@ async def _run() -> None:
 
     registry = Registry(args.data_root)
     sandbox = Sandbox.from_config(cfg.sandbox) if cfg is not None else Sandbox()
+
+    # Pre-build a persistent venv for the whole run so every tool call reuses a
+    # stable, ready environment instead of rebuilding one per call (uv mode).
+    persistent_venv = getattr(cfg.sandbox, "persistent_venv", True) if cfg is not None else True
+    if sandbox.mode == "uv" and persistent_venv:
+        try:
+            reqs = registry.get_run_requirements(args.usecase, args.run_id)
+            venv_dir = registry._run_dir(args.usecase, args.run_id) / ".venv"
+            await sandbox.prepare(reqs, venv_dir)
+        except Exception as e:  # never block the run on prepare — fall back to per-call uv
+            print(f"[sandbox] persistent venv prepare skipped: {e}", file=sys.stderr)
+
     telemetry_path = registry._run_dir(args.usecase, args.run_id) / "telemetry.jsonl"
     telemetry = TelemetryWriter(telemetry_path)
 

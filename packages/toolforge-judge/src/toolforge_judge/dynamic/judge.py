@@ -14,7 +14,7 @@ from ..metrics.engine import MetricEngine
 from ..metrics.env import MetricEnv
 from ..static.llm import JudgeLLM
 from ..static.store import JudgeStore, ToolNoteRecord
-from .aggregate import aggregate_tool_notes
+from .aggregate import aggregate_tool_notes, scores_from_global_notes
 from .models import DynamicJudgeReport
 from .prompt import build_diagnosis_message
 from .stability import compute_structural_stability
@@ -40,8 +40,11 @@ class DynamicJudge:
     ) -> DynamicJudgeReport:
         """Build the cross-run report from a window + the static notes."""
         env = window.env
-        metric_report = self._engine.compute(window)
         global_notes = aggregate_tool_notes(note_records, env)
+        # Feed the judge scores back into the metric window so the judge-scored
+        # families (2 & 5) report as evaluated, not pending.
+        window.judge_scores, window.judged_tools = scores_from_global_notes(global_notes)
+        metric_report = self._engine.compute(window)
         stability = compute_structural_stability(metric_report, env)
 
         report = DynamicJudgeReport(
@@ -68,14 +71,34 @@ class DynamicJudge:
         env: MetricEnv | None = None,
         *,
         run_id: str | None = None,
+        run_ids: list[str] | None = None,
         store: DynamicJudgeStore | None = None,
         diagnose: bool = True,
     ) -> DynamicJudgeReport:
-        """Load a window from Postgres, assess it, and optionally persist."""
+        """Load a window from Postgres, assess it, and optionally persist.
+
+        ``run_ids`` aggregates a chosen set of pipeline versions into one
+        cross-run report; ``run_id`` restricts to a single version.
+        """
         env = env or MetricEnv()
-        window = reader.load_window(usecase_id, env, run_id=run_id)
-        notes = notes_store.load_tool_notes(usecase_id, run_id=run_id)
+        window = reader.load_window(usecase_id, env, run_id=run_id, run_ids=run_ids)
+        notes = self._load_notes(notes_store, usecase_id, run_id, run_ids)
         report = await self.assess(window, notes, diagnose=diagnose)
         if store is not None:
             store.save_report(report)
         return report
+
+    @staticmethod
+    def _load_notes(
+        notes_store: JudgeStore,
+        usecase_id: str,
+        run_id: str | None,
+        run_ids: list[str] | None,
+    ) -> list[ToolNoteRecord]:
+        """Static notes for the selection (one run, a set of runs, or all)."""
+        if run_ids:
+            notes: list[ToolNoteRecord] = []
+            for rid in run_ids:
+                notes.extend(notes_store.load_tool_notes(usecase_id, run_id=rid))
+            return notes
+        return notes_store.load_tool_notes(usecase_id, run_id=run_id)

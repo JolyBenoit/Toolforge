@@ -209,6 +209,29 @@ def test_engine_runs_full_catalogue_and_serialises():
     assert isinstance(report.to_dict()["values"], list)
 
 
+def test_judge_scored_metrics_reflect_judge_scores():
+    from toolforge_judge.metrics.base import JUDGED, OK
+    from toolforge_judge.metrics.judge_scored import SelectionPrecision
+
+    env = MetricEnv(min_samples=1, selection_precision_min=0.8)
+    tasks = [_task("t1", [
+        _span("t1", "s1", "search"),
+        _span("t1", "s2", "book"),
+        _span("t1", "s3", "pay"),
+    ])]
+    win = MetricWindow.from_tasks("uc1", tasks, env)
+    # search scored; book judged but without this score; pay never judged.
+    win.judge_scores = {("search", "selection_precision"): (0.5, 3)}
+    win.judged_tools = {"search", "book"}
+
+    vals = {v.tool_id: v for v in SelectionPrecision().compute(win)}
+    assert vals["search"].status == OK
+    assert vals["search"].value == pytest.approx(0.5)
+    assert vals["search"].breached is True          # 0.5 < 0.8 floor
+    assert vals["book"].status == JUDGED and vals["book"].value is None
+    assert vals["pay"].status == "requires_judge"
+
+
 def test_version_delta_flags_regression():
     env = MetricEnv(min_samples=1, version_delta_regression=0.05)
     before = MetricEngine().compute_from_tasks(
@@ -231,3 +254,57 @@ def test_env_overrides_and_unknown_key_rejected():
     assert env.short_window == 5
     with pytest.raises(KeyError):
         MetricEnv.with_overrides({"nope": 1})
+
+
+# ---------------------------------------------------------------------------
+# Window run selection (single / multi / all)
+# ---------------------------------------------------------------------------
+
+
+def _run_task(task_id: str, run_id: str, *, offset: int = 0) -> TaskRecord:
+    return TaskRecord(
+        task_id=task_id, run_id=run_id, usecase_id="uc1", status="success",
+        started_at=_T0 + timedelta(minutes=offset),
+        spans=[_span(task_id, f"{task_id}s", "search")],
+    )
+
+
+def _mixed_tasks() -> list[TaskRecord]:
+    return [
+        _run_task("t1", "runA", offset=0),
+        _run_task("t2", "runB", offset=1),
+        _run_task("t3", "runC", offset=2),
+    ]
+
+
+def test_window_all_runs_keeps_everything():
+    win = MetricWindow.from_tasks("uc1", _mixed_tasks(), MetricEnv(min_samples=1))
+    assert {t.run_id for t in win.long} == {"runA", "runB", "runC"}
+    assert win.run_id is None
+    assert win.run_ids is None
+
+
+def test_window_single_run_filters_and_labels():
+    win = MetricWindow.from_tasks(
+        "uc1", _mixed_tasks(), MetricEnv(min_samples=1), run_id="runB"
+    )
+    assert {t.run_id for t in win.long} == {"runB"}
+    assert win.run_id == "runB"
+    assert win.run_ids == ["runB"]
+
+
+def test_window_multi_run_filters_and_joins_label():
+    win = MetricWindow.from_tasks(
+        "uc1", _mixed_tasks(), MetricEnv(min_samples=1), run_ids=["runC", "runA"]
+    )
+    assert {t.run_id for t in win.long} == {"runA", "runC"}
+    # label is deterministic (sorted, joined), independent of input order
+    assert win.run_id == "runA+runC"
+    assert win.run_ids == ["runA", "runC"]
+
+
+def test_window_single_element_run_ids_labels_like_run_id():
+    win = MetricWindow.from_tasks(
+        "uc1", _mixed_tasks(), MetricEnv(min_samples=1), run_ids=["runB"]
+    )
+    assert win.run_id == "runB"

@@ -18,12 +18,38 @@ the stdout JSON so the production telemetry layer can record them.
 """
 import io
 import json
+import socket
 import sys
 import time as _time
 import traceback
 import types
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+# Fallback per-call LLM timeout (seconds) when the sandbox passes no budget.
+_DEFAULT_LLM_TIMEOUT = 60.0
+
+
+def _http_json(req, model, timeout):
+    """Send an HTTP request, returning parsed JSON, with clear failure modes.
+
+    A bare urllib call has no timeout: a slow/hung LLM endpoint would block
+    until the *sandbox* kills the whole process (exit_code -1), discarding the
+    result and the nested-call log. Bounding each call here turns that into a
+    normal handler error with a readable message instead.
+    """
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"LLM API error {e.code} from '{model}': {detail}") from None
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        reason = getattr(e, "reason", e)
+        raise TimeoutError(
+            f"LLM call to '{model}' did not complete within {timeout:.0f}s ({reason})"
+        ) from None
 
 _out = sys.stdout
 sys.stdout = io.StringIO()
@@ -34,9 +60,17 @@ _nlc_seq: int = 0
 
 
 class _LLMTool:
-    def __init__(self, name, cfg):
+    def __init__(self, name, cfg, default_timeout=None):
         self._name = name
         self._cfg = cfg
+        self._default_timeout = default_timeout
+
+    def _timeout(self):
+        """Per-call timeout: the provider's configured value, capped by the
+        sandbox budget so a call can never outlast the process that hosts it."""
+        budget = self._default_timeout or _DEFAULT_LLM_TIMEOUT
+        cfg_to = self._cfg.get("timeout")
+        return min(cfg_to, budget) if cfg_to else budget
 
     def _call(self, messages, max_tokens=None, temperature=None):
         global _nlc_seq
@@ -50,6 +84,7 @@ class _LLMTool:
         model = cfg["model"]
         mt = max_tokens or cfg.get("max_tokens", 1024)
         api_key = cfg["api_key"]
+        to = self._timeout()
 
         if provider == "anthropic":
             body = {"model": model, "max_tokens": mt, "messages": messages}
@@ -63,8 +98,7 @@ class _LLMTool:
                     "content-type": "application/json",
                 },
             )
-            with urllib.request.urlopen(req) as r:
-                resp = json.loads(r.read())
+            resp = _http_json(req, model, to)
             text = resp["content"][0]["text"]
             tokens_in = resp.get("usage", {}).get("input_tokens", 0)
             tokens_out = resp.get("usage", {}).get("output_tokens", 0)
@@ -80,8 +114,7 @@ class _LLMTool:
                     "content-type": "application/json",
                 },
             )
-            with urllib.request.urlopen(req) as r:
-                resp = json.loads(r.read())
+            resp = _http_json(req, model, to)
             text = resp["choices"][0]["message"]["content"]
             tokens_in = resp.get("usage", {}).get("prompt_tokens", 0)
             tokens_out = resp.get("usage", {}).get("completion_tokens", 0)
@@ -109,9 +142,10 @@ class _LLMTool:
 
 
 class _LLMRegistry:
-    def __init__(self, configs):
+    def __init__(self, configs, default_timeout=None):
         self._configs = configs or {}
         self._cache = {}
+        self._default_timeout = default_timeout
 
     def __getitem__(self, name):
         if name not in self._cache:
@@ -121,7 +155,7 @@ class _LLMRegistry:
                     "LLM tool '" + name + "' is not configured. "
                     "Available: " + repr(list(self._configs.keys()))
                 )
-            self._cache[name] = _LLMTool(name, cfg)
+            self._cache[name] = _LLMTool(name, cfg, self._default_timeout)
         return self._cache[name]
 
     def __getattr__(self, name):
@@ -138,7 +172,7 @@ try:
     mod = types.ModuleType("_handler")
     exec(compile(payload["handler_source"], "<handler>", "exec"), mod.__dict__)
     # Inject after exec so module-level definitions in the handler cannot shadow these.
-    mod.__dict__["llm"] = _LLMRegistry(payload.get("llm_configs"))
+    mod.__dict__["llm"] = _LLMRegistry(payload.get("llm_configs"), payload.get("llm_timeout"))
     mod.__dict__["INPUTS_DIR"] = payload.get("inputs_dir")
     mod.__dict__["OUTPUTS_DIR"] = payload.get("outputs_dir")
     if "run" not in mod.__dict__:
