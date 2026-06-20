@@ -7,7 +7,15 @@ from toolforge_judge.architecture.models import (
     ArchitectureFinding,
     ArchitectureJudgeReport,
 )
-from toolforge_judge.creator import CreatorInstruction, CreatorJudge
+from toolforge_judge.creator import (
+    CreatorInstruction,
+    CreatorJudge,
+    CreatorJudgeReport,
+    NullCreatorJudgeStore,
+    render_briefing,
+    run_creator_judge,
+    select_instructions,
+)
 from toolforge_judge.creator.judge import problematic_tools
 from toolforge_judge.creator.prompt import parse_instructions
 from toolforge_judge.dynamic.models import (
@@ -262,3 +270,87 @@ async def test_structural_finding_with_no_tool_still_reaches_stage_2():
     assert result.tool_axes == []          # no tool to raise an axis on
     assert len(instr_llm.calls) == 1       # stage 2 still ran
     assert result.instructions[0].action == "create_tool"
+
+
+# --- persistence round-trip (no DB) ---------------------------------------
+
+
+def _three_instr_report() -> CreatorJudgeReport:
+    return CreatorJudgeReport(
+        usecase_id="uc1", run_id="run1", computed_at=_NOW,
+        instructions=[
+            CreatorInstruction(action="modify_usage", target_tools=["search"],
+                               body="cache results", priority="medium",
+                               expected_effect="lower redundancy"),
+            CreatorInstruction(action="modify_implementation", target_tools=["book"],
+                               body="return all options", priority="high",
+                               rationale="truncation"),
+            CreatorInstruction(action="create_tool", target_tools=[],
+                               body="add pdf_fetch", priority="low"),
+        ],
+    )
+
+
+def test_report_dict_round_trip_preserves_instruction_ids():
+    report = _three_instr_report()
+    restored = CreatorJudgeReport.from_dict(report.to_dict())
+    assert [i.instruction_id for i in restored.instructions] == [
+        i.instruction_id for i in report.instructions
+    ]
+    assert restored.instructions[1].action == "modify_implementation"
+    assert restored.instructions[1].priority == "high"
+
+
+# --- briefing rendering ----------------------------------------------------
+
+
+def test_select_instructions_orders_by_priority_and_filters():
+    report = _three_instr_report()
+    # None -> all, priority-ordered high, medium, low.
+    assert [i.priority for i in select_instructions(report, None)] == [
+        "high", "medium", "low"
+    ]
+    # An explicit subset keeps only the chosen ids.
+    keep = {report.instructions[2].instruction_id}
+    chosen = select_instructions(report, keep)
+    assert [i.action for i in chosen] == ["create_tool"]
+
+
+def test_render_briefing_is_frozen_text_with_selected_only():
+    report = _three_instr_report()
+    high_id = report.instructions[1].instruction_id
+    text = render_briefing(report, {high_id})
+    assert "approved the 1 corrective change(s)" in text
+    assert "return all options" in text          # the selected instruction
+    assert "cache results" not in text           # an unselected one
+    assert f"judge_instruction_id: {high_id}" in text
+    assert "validate_in_sandbox" in text         # the how-to is baked in
+
+
+def test_render_briefing_empty_when_nothing_selected():
+    assert render_briefing(_three_instr_report(), set()) == ""
+
+
+async def test_run_creator_judge_persists_via_store():
+    saved: list[CreatorJudgeReport] = []
+
+    class _RecordingStore(NullCreatorJudgeStore):
+        def save_report(self, report: CreatorJudgeReport) -> None:
+            saved.append(report)
+
+    report = _report(
+        metric_values=[_breach("latency_p95", "search", 0.9)],
+        global_notes=[ToolGlobalNote(tool_id="search", n_tasks=10,
+                                     breaches=["selection_precision"])],
+    )
+    instr_llm = FakeInstructionLLM(
+        '{"instructions": [{"action": "modify_usage", "target_tools": ["search"],'
+        ' "body": "cache results"}]}'
+    )
+    judge = CreatorJudge(axes_llm=FakeAxesLLM(), instruction_llm=instr_llm)
+    result = await run_creator_judge(
+        judge, report, _usecase(), store=_RecordingStore()
+    )
+    assert len(saved) == 1
+    assert saved[0] is result
+    assert result.instructions[0].action == "modify_usage"

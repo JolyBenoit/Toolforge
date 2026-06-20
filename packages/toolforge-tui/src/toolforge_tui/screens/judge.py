@@ -27,7 +27,7 @@ from pathlib import Path
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
@@ -84,6 +84,21 @@ JudgeScreen .pane-log {
     height: 1fr;
     border: solid $panel;
     margin: 0 1 1 1;
+}
+JudgeScreen #creator-list {
+    height: 1fr;
+    border: solid $panel;
+    margin: 0 1 1 1;
+    padding: 0 1;
+}
+JudgeScreen .rec-section {
+    height: auto;
+    margin-top: 1;
+    text-style: bold;
+}
+JudgeScreen #creator-list Checkbox {
+    height: auto;
+    margin: 0 0 1 0;
 }
 """
 
@@ -238,6 +253,7 @@ class JudgeScreen(Screen[None]):
         ("s", "run_static", "Run static"),
         ("d", "run_dynamic", "Run dynamic"),
         ("a", "run_architecture", "Run architecture"),
+        ("c", "run_creator", "Recommendations"),
     ]
 
     def __init__(
@@ -258,6 +274,12 @@ class JudgeScreen(Screen[None]):
         self._config_path = config_path
         self._data_root = data_root
         self._busy = False
+        # The most recent dynamic report computed in this session — the creator
+        # judge consumes it (avoids a heavy MetricReport rehydration from the DB).
+        self._last_dynamic_report: object | None = None
+        # The creator report currently rendered (freshly built or loaded), so
+        # "Send to Creator" can map checked boxes back to instructions.
+        self._current_creator_report: object | None = None
 
     # ------------------------------------------------------------------
     # Layout
@@ -302,6 +324,17 @@ class JudgeScreen(Screen[None]):
                 yield RichLog(
                     id="architecture-log", classes="pane-log", markup=True
                 )
+            with TabPane("Recommendations", id="tab-creator"):
+                yield Static("", id="creator-info", classes="pane-info", markup=True)
+                with Horizontal(classes="pane-controls"):
+                    yield Button(
+                        "Build recommendations", id="run-creator", variant="primary"
+                    )
+                    yield Button(
+                        "Send to Creator (0)", id="send-creator",
+                        variant="success", disabled=True,
+                    )
+                yield VerticalScroll(id="creator-list")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -318,9 +351,11 @@ class JudgeScreen(Screen[None]):
             self.query_one("#static-info", Static).update(hint)
             self.query_one("#dynamic-info", Static).update(hint)
             self.query_one("#architecture-info", Static).update(hint)
+            self.query_one("#creator-info", Static).update(hint)
             self.query_one("#run-static", Button).disabled = True
             self.query_one("#run-dynamic", Button).disabled = True
             self.query_one("#run-architecture", Button).disabled = True
+            self.query_one("#run-creator", Button).disabled = True
         self._load()
         if self._can_run:
             self._refresh_pane_info()
@@ -330,6 +365,13 @@ class JudgeScreen(Screen[None]):
                 "truncation), coverage gaps, redundancy and wiring issues.  "
                 "[dim]Advisory; feeds the creator judge. Changes nothing.[/]"
             )
+            self.query_one("#creator-info", Static).update(
+                "[bold]Corrective recommendations[/] for the Creator, synthesised "
+                "from the dynamic report + architecture findings.  [dim]Run the "
+                "Dynamic judge first; uncheck what you don't want, then send the "
+                "selection to a Creator on a fresh draft fork.[/]"
+            )
+            self._load_creator_report()
 
     def action_reload(self) -> None:
         self.query_one("#status", Static).update("[dim]Reloading telemetry…[/]")
@@ -344,6 +386,10 @@ class JudgeScreen(Screen[None]):
             self.action_run_dynamic()
         elif event.button.id == "run-architecture":
             self.action_run_architecture()
+        elif event.button.id == "run-creator":
+            self.action_run_creator()
+        elif event.button.id == "send-creator":
+            self._send_to_creator()
 
     # ------------------------------------------------------------------
     # Metrics tab — read-only telemetry (off the UI thread)
@@ -618,7 +664,13 @@ class JudgeScreen(Screen[None]):
             self.notify(f"Dynamic judge failed: {exc}", severity="error")
             self._set_busy(False)
             return
+        # Cache it so the Recommendations tab can build on it without a re-run.
+        self._last_dynamic_report = report
         self._render_dynamic_report(log, report)
+        self.query_one("#creator-info", Static).update(
+            "[bold]Corrective recommendations[/] — dynamic report ready.  "
+            "[dim]Press [b]Build recommendations[/] to synthesise the changes.[/]"
+        )
         self.notify("Dynamic judge done.", timeout=4)
         self._set_busy(False)
 
@@ -790,6 +842,277 @@ class JudgeScreen(Screen[None]):
                 log.write(f"    [dim]at risk: {f.requirement_threatened}[/]")
 
     # ------------------------------------------------------------------
+    # Recommendations tab — corrective instructions for the Creator
+    # ------------------------------------------------------------------
+
+    def action_run_creator(self) -> None:
+        if not self._can_run or self._busy:
+            return
+        self.query_one(TabbedContent).active = "tab-creator"
+        if self._last_dynamic_report is None:
+            self.notify(
+                "Run the Dynamic judge first (Dynamic tab) — its report feeds "
+                "the recommendations.",
+                severity="warning", timeout=6,
+            )
+            return
+        self._run_creator()
+
+    @work(exclusive=True)
+    async def _run_creator(self) -> None:
+        self._set_busy(True)
+        info = self.query_one("#creator-info", Static)
+        info.update("[bold]Synthesising recommendations…[/]")
+        try:
+            # The judge LLMs are awaited here, so build them on the UI loop.
+            config = self._load_config()
+            judge = self._build_creator_judge(config)
+            usecase, arch_report, store = await asyncio.to_thread(
+                self._build_creator_inputs
+            )
+            from toolforge_judge.creator import run_creator_judge
+
+            report = await run_creator_judge(
+                judge, self._last_dynamic_report, usecase,
+                architecture_report=arch_report, store=store,
+            )
+        except Exception as exc:  # noqa: BLE001
+            info.update(f"[red]Recommendations failed: {exc}[/]")
+            self.notify(f"Recommendations failed: {exc}", severity="error")
+            self._set_busy(False)
+            return
+        self._render_creator_report(report)
+        n = len(report.instructions)
+        info.update(
+            f"[bold]{n}[/] corrective change(s) proposed.  "
+            "[dim]Uncheck what you don't want, then ‘Send to Creator’.[/]"
+            if n else
+            "[green]No corrective changes — nothing breaching.[/]"
+        )
+        self.notify(f"Recommendations: {n} change(s).", timeout=4)
+        self._set_busy(False)
+
+    def _build_creator_inputs(self):  # noqa: ANN202
+        """Blocking: the usecase spec, persisted architecture report, store."""
+        from toolforge_judge.architecture import get_architecture_judge_store
+        from toolforge_judge.creator import get_creator_judge_store
+        from toolforge_judge.static.runner import build_usecase_spec
+        from toolforge_registry import Registry
+
+        run_id = self._resolve_arch_run_id()
+        registry = Registry(self._data_root)
+        usecase = build_usecase_spec(registry, self._usecase_id, run_id)
+        arch_report = get_architecture_judge_store(self._dsn).load_report(
+            self._usecase_id, run_id=run_id
+        )
+        store = get_creator_judge_store(self._dsn)
+        return usecase, arch_report, store
+
+    def _build_creator_judge(self, config):  # noqa: ANN001, ANN202
+        """Build the two-stage creator judge on the judge LLM backend.
+
+        Both stages share the judge's model/client but use their own system
+        prompts, resolved next to the judge prompt configured in toolforge.toml.
+        """
+        from toolforge_core import create_client
+        from toolforge_core.config import load_system_prompt
+        from toolforge_judge.creator import CreatorJudge
+        from toolforge_judge.static import AgentLLMJudge
+
+        jc = config.llm.judge
+        provider_conf = config.llm.providers[jc.provider]
+        client = create_client(jc.provider, provider_conf)
+        prompts_dir = jc.system_prompt_file.parent
+
+        def _llm(filename: str) -> AgentLLMJudge:
+            return AgentLLMJudge(
+                client=client,
+                model=jc.model,
+                system_prompt=load_system_prompt(prompts_dir / filename),
+                max_tokens=jc.max_tokens,
+                temperature=jc.temperature,
+            )
+
+        return CreatorJudge(
+            axes_llm=_llm("judge_creator_axes_system.md"),
+            instruction_llm=_llm("judge_creator_system.md"),
+        )
+
+    @work(exclusive=False)
+    async def _load_creator_report(self) -> None:
+        """Render the last persisted creator report so it is consultable on
+        reload, without rebuilding (which needs a fresh dynamic run)."""
+        try:
+            report = await asyncio.to_thread(self._read_creator_report)
+        except Exception:  # noqa: BLE001 - tables may not exist yet
+            return
+        if report is not None:
+            self._render_creator_report(report)
+
+    def _read_creator_report(self):  # noqa: ANN202
+        from toolforge_judge.creator import get_creator_judge_store
+
+        return get_creator_judge_store(self._dsn).load_report(
+            self._usecase_id, run_id=self._resolve_arch_run_id()
+        )
+
+    def _render_creator_report(self, report) -> None:  # noqa: ANN001
+        """Deconstruct the report into per-tool + structural sub-reports, each
+        instruction a checkbox (all checked by default)."""
+        self._current_creator_report = report
+        container = self.query_one("#creator-list", VerticalScroll)
+        container.remove_children()
+        if report is None or not report.instructions:
+            container.mount(
+                Static("[dim]No recommendations yet.[/]", markup=True)
+            )
+            self._update_send_count()
+            return
+
+        per_tool: dict[str, list] = {}
+        structural: list = []
+        for instr in report.instructions:
+            if instr.is_structural or not instr.target_tools:
+                structural.append(instr)
+            else:
+                per_tool.setdefault(instr.target_tools[0], []).append(instr)
+
+        for tool_id, instrs in per_tool.items():
+            axes = report.axes_for(tool_id)
+            head = f"▸ {tool_id}"
+            if axes and axes.summary:
+                head += f"  [dim]— {axes.summary}[/]"
+            container.mount(Static(head, classes="rec-section", markup=True))
+            for instr in instrs:
+                self._mount_instruction(container, instr)
+
+        if structural:
+            container.mount(
+                Static("▸ Structural", classes="rec-section", markup=True)
+            )
+            for instr in structural:
+                self._mount_instruction(container, instr)
+        self._update_send_count()
+
+    def _mount_instruction(self, container, instr) -> None:  # noqa: ANN001
+        targets = ", ".join(instr.target_tools) or "(new tool)"
+        container.mount(
+            Checkbox(
+                f"[{instr.priority.upper()}] {instr.action} · {targets}",
+                value=True, id=f"instr-{instr.instruction_id}",
+            )
+        )
+        detail = f"    Change: {instr.body}"
+        if instr.rationale:
+            detail += f"\n    Why: {instr.rationale}"
+        if instr.expected_effect:
+            detail += f"\n    Effect: {instr.expected_effect}"
+        container.mount(Static(f"[dim]{detail}[/]", markup=True))
+
+    def _checked_instruction_ids(self) -> set[str]:
+        ids: set[str] = set()
+        for cb in self.query("#creator-list Checkbox").results(Checkbox):
+            if cb.value and cb.id and cb.id.startswith("instr-"):
+                ids.add(cb.id[len("instr-"):])
+        return ids
+
+    def _update_send_count(self) -> None:
+        n = len(self._checked_instruction_ids())
+        btn = self.query_one("#send-creator", Button)
+        btn.label = f"Send to Creator ({n})"
+        btn.disabled = n == 0 or self._busy
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id and event.checkbox.id.startswith("instr-"):
+            self._update_send_count()
+
+    def _send_to_creator(self) -> None:
+        if self._busy or self._current_creator_report is None:
+            return
+        checked = self._checked_instruction_ids()
+        if not checked:
+            self.notify("Nothing selected to send.", severity="warning")
+            return
+        from toolforge_judge.creator import render_briefing
+
+        briefing = render_briefing(self._current_creator_report, checked)
+        if not briefing.strip():
+            self.notify("Nothing selected to send.", severity="warning")
+            return
+        self._launch_creator_with_briefing(briefing, len(checked))
+
+    @work
+    async def _launch_creator_with_briefing(self, briefing: str, n: int) -> None:
+        """Fork the assessed production version into a fresh draft run, then open
+        a Creator on that fork seeded with the approved-instruction briefing.
+
+        The Creator can only edit tools on a ``draft`` run, so we never mutate the
+        immutable production version — we fork it (copying its tools) and let the
+        operator promote the result afterwards.
+        """
+        import sys
+
+        from mcp.client.stdio import StdioServerParameters
+        from toolforge_core import (
+            LLMAgent,
+            create_client,
+            creator_agent_stdio,
+            load_config,
+        )
+        from toolforge_registry import Registry
+
+        from .creator import CreatorScreen
+
+        self._set_busy(True)
+        try:
+            source_run = self._resolve_arch_run_id()
+            if source_run is None:
+                self.notify(
+                    "No production version to fork.", severity="error"
+                )
+                self._set_busy(False)
+                return
+            registry = Registry(self._data_root)
+            fork = await asyncio.to_thread(
+                registry.fork_run, self._usecase_id, source_run
+            )
+            config = load_config(self._config_path)
+            provider_conf = config.llm.providers[config.llm.creator.provider]
+            client = create_client(config.llm.creator.provider, provider_conf)
+            agent = LLMAgent.from_config(config.llm.creator, client)
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=[
+                    "-m", "toolforge_mcp_creator",
+                    "--usecase", self._usecase_id,
+                    "--run", fork.run_id,
+                    "--data-root", str(self._data_root),
+                    "--config", str(self._config_path),
+                ],
+            )
+            self.notify(
+                f"Forked {source_run} → draft {fork.run_id}; launching Creator "
+                f"with {n} change(s).",
+                timeout=6,
+            )
+            async with creator_agent_stdio(
+                stdio_params=params, agent=agent
+            ) as creator_agent:
+                await self.app.push_screen_wait(
+                    CreatorScreen(
+                        agent=creator_agent,
+                        usecase_id=self._usecase_id,
+                        run_id=fork.run_id,
+                        data_root=self._data_root,
+                        seed_message=briefing,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not open Creator: {exc}", severity="error")
+        finally:
+            self._set_busy(False)
+
+    # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
 
@@ -811,3 +1134,4 @@ class JudgeScreen(Screen[None]):
         self.query_one("#run-static", Button).disabled = busy
         self.query_one("#run-dynamic", Button).disabled = busy
         self.query_one("#run-architecture", Button).disabled = busy
+        self.query_one("#run-creator", Button).disabled = busy

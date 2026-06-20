@@ -32,6 +32,11 @@ class ArchitectureJudgeStore:
     ) -> list[ArchitectureFinding]:
         raise NotImplementedError
 
+    def load_report(
+        self, usecase_id: str, *, run_id: str | None = None
+    ) -> ArchitectureJudgeReport | None:
+        raise NotImplementedError
+
 
 class NullArchitectureJudgeStore(ArchitectureJudgeStore):
     """No-op store for tests / dry runs; remembers nothing."""
@@ -43,6 +48,11 @@ class NullArchitectureJudgeStore(ArchitectureJudgeStore):
         self, usecase_id: str, *, run_id: str | None = None
     ) -> list[ArchitectureFinding]:
         return []
+
+    def load_report(
+        self, usecase_id: str, *, run_id: str | None = None
+    ) -> ArchitectureJudgeReport | None:
+        return None
 
 
 _DDL = """
@@ -181,6 +191,39 @@ class PostgresArchitectureJudgeStore(ArchitectureJudgeStore):
             )
             for r in rows
         ]
+
+    def load_report(
+        self, usecase_id: str, *, run_id: str | None = None
+    ) -> ArchitectureJudgeReport | None:
+        """Rehydrate the report metadata + findings (contracts omitted).
+
+        The creator judge consumes only ``findings`` / ``problematic_tools``, so
+        the heavy pass-1 contracts are not reconstructed; the latest assessment
+        is returned when ``run_id`` is not pinned.
+        """
+        sql = (
+            "SELECT run_id, computed_at, mode, judge_model "
+            "FROM tf_judge_architecture_runs WHERE usecase_id = %s"
+        )
+        params: list[Any] = [usecase_id]
+        if run_id is not None:
+            sql += " AND run_id = %s"
+            params.append(run_id)
+        sql += " ORDER BY computed_at DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        found_run = row[0] or None
+        return ArchitectureJudgeReport(
+            usecase_id=usecase_id,
+            run_id=found_run,
+            computed_at=str(row[1]),
+            judge_model=row[3] or "",
+            mode=row[2] or "design_time",
+            contracts=[],
+            findings=self.load_findings(usecase_id, run_id=row[0]),
+        )
 
 
 def get_architecture_judge_store(dsn: str) -> ArchitectureJudgeStore:

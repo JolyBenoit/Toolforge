@@ -81,12 +81,17 @@ class CreatorScreen(Screen[None]):
         usecase_id: str,
         run_id: str,
         data_root: Path,
+        seed_message: str | None = None,
     ) -> None:
         super().__init__()
         self._agent = agent
         self._usecase_id = usecase_id
         self._run_id = run_id
         self._registry = Registry(data_root)
+        # An optional opening turn (e.g. the Judge's approved-instruction
+        # briefing) auto-dispatched on mount, so the operator lands on a Creator
+        # already working through the corrective changes.
+        self._seed_message = seed_message
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -111,6 +116,16 @@ class CreatorScreen(Screen[None]):
         log.write("Type a message to the Creator agent. Press [bold]Escape[/] to return.\n")
         self.query_one(Input).focus()
         self._refresh_tools()
+        if self._seed_message:
+            self._dispatch_seed(self._seed_message)
+
+    def _dispatch_seed(self, message: str) -> None:
+        """Auto-send the opening briefing as the first turn."""
+        self.busy = True
+        log = self.query_one("#log", RichLog)
+        log.write("[bold green]You[/] [dim](Judge briefing):[/]")
+        log.write(message)
+        self._stream_turn(message)
 
     def watch_stream_text(self, text: str) -> None:
         label = self.query_one("#streaming", Label)

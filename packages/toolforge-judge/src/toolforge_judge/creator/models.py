@@ -60,6 +60,16 @@ class ToolImprovementAxes:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ToolImprovementAxes:
+        raw_axes = data.get("axes") or []
+        return cls(
+            tool_id=str(data.get("tool_id", "")),
+            summary=str(data.get("summary", "")),
+            axes=[str(a) for a in raw_axes],
+            evidence=dict(data.get("evidence") or {}),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Stage 2 — corrective instructions to the Creator
@@ -100,6 +110,20 @@ class CreatorInstruction:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CreatorInstruction:
+        raw_targets = data.get("target_tools") or []
+        return cls(
+            action=data.get("action", "modify_implementation"),
+            target_tools=[str(t) for t in raw_targets],
+            body=str(data.get("body", "")),
+            rationale=str(data.get("rationale", "")),
+            priority=data.get("priority", "medium"),
+            expected_effect=str(data.get("expected_effect", "")),
+            # Preserve the stored id rather than recomputing (idempotent replay).
+            instruction_id=str(data.get("instruction_id", "")),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Report
@@ -138,3 +162,23 @@ class CreatorJudgeReport:
             "tool_axes": [a.to_dict() for a in self.tool_axes],
             "instructions": [i.to_dict() for i in self.instructions],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CreatorJudgeReport:
+        return cls(
+            usecase_id=str(data.get("usecase_id", "")),
+            run_id=data.get("run_id"),
+            computed_at=str(data.get("computed_at", "")),
+            tool_axes=[
+                ToolImprovementAxes.from_dict(a) for a in data.get("tool_axes") or []
+            ],
+            instructions=[
+                CreatorInstruction.from_dict(i) for i in data.get("instructions") or []
+            ],
+        )
+
+    def instruction_by_id(self, instruction_id: str) -> CreatorInstruction | None:
+        for i in self.instructions:
+            if i.instruction_id == instruction_id:
+                return i
+        return None
