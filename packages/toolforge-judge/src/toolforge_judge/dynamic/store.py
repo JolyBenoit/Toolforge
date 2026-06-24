@@ -23,6 +23,9 @@ class DynamicJudgeStore:
     def save_report(self, report: DynamicJudgeReport) -> None:
         raise NotImplementedError
 
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id`` (no-op by default)."""
+
 
 class NullDynamicJudgeStore(DynamicJudgeStore):
     def save_report(self, report: DynamicJudgeReport) -> None:
@@ -133,6 +136,15 @@ class PostgresDynamicJudgeStore(DynamicJudgeStore):
                         note.recommendation_rate, note.dominant_target,
                         json.dumps(note.breaches, ensure_ascii=False), now,
                     ),
+                )
+            conn.commit()
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        with self._connect() as conn:
+            for table in ("tf_judge_dynamic_runs", "tf_judge_global_notes"):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
                 )
             conn.commit()
 

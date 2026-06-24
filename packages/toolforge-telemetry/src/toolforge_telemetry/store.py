@@ -84,6 +84,14 @@ class TelemetryStore:
     ) -> None:
         raise NotImplementedError
 
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id``.
+
+        Default no-op: a store that does not key data by ``usecase_id`` (or the
+        JSONL store, whose files travel with the renamed folder) has nothing to
+        do. Only the Postgres backend overrides this.
+        """
+
 
 # ---------------------------------------------------------------------------
 # NullTelemetryStore — no-op, for tests and offline stubs

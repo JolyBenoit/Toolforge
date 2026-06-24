@@ -365,6 +365,7 @@ class JudgeScreen(Screen[None]):
                 "truncation), coverage gaps, redundancy and wiring issues.  "
                 "[dim]Advisory; feeds the creator judge. Changes nothing.[/]"
             )
+            self._load_architecture_report()
             self.query_one("#creator-info", Static).update(
                 "[bold]Corrective recommendations[/] for the Creator, synthesised "
                 "from the dynamic report + architecture findings.  [dim]Run the "
@@ -757,11 +758,18 @@ class JudgeScreen(Screen[None]):
             )
             judge = self._build_architecture_judge(config)
             report = await judge.assess(
-                spec, max_concurrency=config.judge.max_concurrency
+                spec,
+                max_concurrency=config.judge.max_concurrency,
+                on_phase=lambda name, total: self._log_arch_phase(log, name, total),
+                on_tool=lambda tid, done, total: self._log_arch_tool(
+                    log, tid, done, total
+                ),
             )
             await asyncio.to_thread(self._save_arch_report, report)
         except Exception as exc:  # noqa: BLE001
-            log.write(f"[red]Architecture judge failed: {exc}[/]")
+            from rich.markup import escape
+
+            log.write(f"[red]Architecture judge failed:[/] {escape(str(exc))}")
             self.notify(f"Architecture judge failed: {exc}", severity="error")
             self._set_busy(False)
             return
@@ -770,6 +778,39 @@ class JudgeScreen(Screen[None]):
             f"Architecture judge: {len(report.findings)} finding(s).", timeout=4
         )
         self._set_busy(False)
+
+    def _log_arch_phase(self, log: RichLog, name: str, total: int) -> None:
+        """Announce a stage of the architecture pass (fires on the UI loop)."""
+        if name == "contracts":
+            log.write(f"[dim]Reading {total} tool contract(s)…[/]")
+        elif name == "findings":
+            log.write("[dim]Synthesising pipeline findings…[/]")
+
+    def _log_arch_tool(self, log: RichLog, tool_id: str, done: int, total: int) -> None:
+        """Tick off one tool as its contract is read (fires on the UI loop)."""
+        from rich.markup import escape
+
+        log.write(f"  [green]✓[/] {escape(tool_id)} [dim]({done}/{total})[/]")
+
+    @work(exclusive=False)
+    async def _load_architecture_report(self) -> None:
+        """Render the last persisted architecture report so it is consultable on
+        reopen, without re-running the (LLM-backed) assessment."""
+        try:
+            report = await asyncio.to_thread(self._read_architecture_report)
+        except Exception:  # noqa: BLE001 - tables may not exist yet
+            return
+        if report is not None:
+            self._render_architecture_report(
+                self.query_one("#architecture-log", RichLog), report, persisted=True
+            )
+
+    def _read_architecture_report(self):  # noqa: ANN202
+        from toolforge_judge.architecture import get_architecture_judge_store
+
+        return get_architecture_judge_store(self._dsn).load_report(
+            self._usecase_id, run_id=self._resolve_arch_run_id()
+        )
 
     def _resolve_arch_run_id(self) -> str | None:
         """The pipeline version to assess: the screen's run, else the latest."""
@@ -820,15 +861,23 @@ class JudgeScreen(Screen[None]):
 
         get_architecture_judge_store(self._dsn).save_report(report)
 
-    def _render_architecture_report(self, log: RichLog, report) -> None:  # noqa: ANN001
-        read = f"{len(report.contracts)} tool contract(s) read"
+    def _render_architecture_report(  # noqa: ANN001
+        self, log: RichLog, report, *, persisted: bool = False
+    ) -> None:
+        if persisted:
+            # A reloaded report omits the pass-1 contracts (the store keeps only
+            # findings), so report on when it was saved rather than "0 read".
+            meta = f"saved {report.computed_at}"
+            log.write("[dim]— last saved architecture assessment —[/]")
+        else:
+            meta = f"{len(report.contracts)} tool contract(s) read"
         if not report.findings:
-            log.write(f"[green]No design issues found.[/] [dim]({read}.)[/]")
+            log.write(f"[green]No design issues found.[/] [dim]({meta}.)[/]")
             return
         sev_color = {"error": "red", "warning": "yellow", "info": "cyan"}
         log.write(
             f"[green]{len(report.findings)} finding(s)[/] "
-            f"[dim]({report.mode}, {read})[/]"
+            f"[dim]({report.mode}, {meta})[/]"
         )
         for f in report.findings:
             color = sev_color.get(f.severity, "white")

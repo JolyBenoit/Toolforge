@@ -37,6 +37,9 @@ class ArchitectureJudgeStore:
     ) -> ArchitectureJudgeReport | None:
         raise NotImplementedError
 
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id`` (no-op by default)."""
+
 
 class NullArchitectureJudgeStore(ArchitectureJudgeStore):
     """No-op store for tests / dry runs; remembers nothing."""
@@ -224,6 +227,18 @@ class PostgresArchitectureJudgeStore(ArchitectureJudgeStore):
             contracts=[],
             findings=self.load_findings(usecase_id, run_id=row[0]),
         )
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        with self._connect() as conn:
+            for table in (
+                "tf_judge_architecture_runs",
+                "tf_judge_architecture_findings",
+            ):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()
 
 
 def get_architecture_judge_store(dsn: str) -> ArchitectureJudgeStore:

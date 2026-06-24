@@ -44,6 +44,9 @@ use_cases/
 # real config — may contain secrets / API keys
 toolforge.toml
 
+# Terminal-Bench integration package (WIP, kept local for now)
+terminal_bench/
+
 # Editor / OS
 .DS_Store
 Thumbs.db

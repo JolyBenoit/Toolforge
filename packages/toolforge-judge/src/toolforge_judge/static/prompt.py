@@ -98,9 +98,28 @@ def build_user_message(usecase: UseCaseSpec, task: TaskRecord) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _preview(text: str, *, limit: int = 300) -> str:
+    """A compact, single-line preview of a model reply for error messages."""
+    snippet = " ".join(text.split())  # collapse newlines/runs of whitespace
+    if len(snippet) > limit:
+        snippet = snippet[:limit] + "…"
+    return snippet
+
+
 def _extract_json(text: str) -> dict[str, Any]:
-    """Pull the first balanced top-level JSON object out of the reply."""
+    """Pull the first balanced top-level JSON object out of the reply.
+
+    On failure the raised ``ValueError`` carries a short preview of what the
+    model actually returned, so an operator can tell an empty completion from a
+    prose/refusal reply from malformed JSON without re-running.
+    """
+    raw = text
     text = text.strip()
+    if not text:
+        raise ValueError(
+            "judge returned an empty response (no text streamed) — check the "
+            "judge model, max_tokens, and provider for the [llm.judge] backend"
+        )
     if text.startswith("```"):
         # strip a ```json … ``` fence if the model added one
         text = text.split("```", 2)[1]
@@ -109,7 +128,10 @@ def _extract_json(text: str) -> dict[str, Any]:
         text = text.strip().rstrip("`").strip()
     start = text.find("{")
     if start == -1:
-        raise ValueError("no JSON object found in judge response")
+        raise ValueError(
+            "no JSON object found in judge response — the model replied with "
+            f"prose instead of JSON: {_preview(raw)!r}"
+        )
     depth = 0
     in_str = False
     esc = False
@@ -129,8 +151,18 @@ def _extract_json(text: str) -> dict[str, Any]:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(text[start : i + 1])
-    raise ValueError("unbalanced JSON object in judge response")
+                blob = text[start : i + 1]
+                try:
+                    return json.loads(blob)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"judge response held malformed JSON ({exc}): "
+                        f"{_preview(blob)!r}"
+                    ) from exc
+    raise ValueError(
+        "unbalanced JSON object in judge response (likely truncated — raise "
+        f"max_tokens for [llm.judge]): {_preview(raw)!r}"
+    )
 
 
 def _clamp01(value: Any) -> float:

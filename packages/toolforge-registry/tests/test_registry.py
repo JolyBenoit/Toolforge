@@ -68,6 +68,57 @@ def test_missing_usecase_raises(reg: Registry) -> None:
         reg.get_usecase("no_such")
 
 
+# --- rename use case ---
+
+
+def test_rename_usecase_moves_folder_and_restamps(reg: Registry, uc: str) -> None:
+    run = reg.create_run(uc)
+    info = reg.rename_usecase(uc, "uc_renamed")
+
+    assert info.usecase_id == "uc_renamed"
+    assert info.prompt == _PROMPT
+    assert not reg.usecase_exists(uc)
+    assert reg.usecase_exists("uc_renamed")
+    # The run survives the move and its metadata points at the new id.
+    moved = reg.get_run("uc_renamed", run.run_id)
+    assert moved.usecase_id == "uc_renamed"
+    with pytest.raises(UsecaseNotFoundError):
+        reg.list_runs(uc)
+
+
+def test_rename_usecase_drops_per_run_venv(reg: Registry, uc: str) -> None:
+    run = reg.create_run(uc)
+    venv = reg._run_dir(uc, run.run_id) / ".venv"
+    venv.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /old/path", encoding="utf-8")
+
+    reg.rename_usecase(uc, "uc_renamed")
+
+    assert not (reg._run_dir("uc_renamed", run.run_id) / ".venv").exists()
+
+
+def test_rename_usecase_to_existing_raises(reg: Registry, uc: str) -> None:
+    reg.create_usecase("uc_other", "x")
+    with pytest.raises(UsecaseExistsError):
+        reg.rename_usecase(uc, "uc_other")
+
+
+def test_rename_missing_usecase_raises(reg: Registry) -> None:
+    with pytest.raises(UsecaseNotFoundError):
+        reg.rename_usecase("no_such", "whatever")
+
+
+def test_rename_usecase_rejects_invalid_id(reg: Registry, uc: str) -> None:
+    with pytest.raises(RegistryError):
+        reg.rename_usecase(uc, "bad id!")
+
+
+def test_rename_usecase_same_id_is_noop(reg: Registry, uc: str) -> None:
+    info = reg.rename_usecase(uc, uc)
+    assert info.usecase_id == uc
+    assert reg.usecase_exists(uc)
+
+
 # --- runs ---
 
 

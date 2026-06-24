@@ -20,6 +20,7 @@ def _pkg_name_from_req(req: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 from .models import (
+    RegistryError,
     RunInfo,
     RunLockedError,
     RunNotFoundError,
@@ -30,6 +31,9 @@ from .models import (
     UsecaseInfo,
     UsecaseNotFoundError,
 )
+
+
+_USECASE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 from ._db import RunDB
 
 
@@ -91,6 +95,62 @@ class Registry:
             if p.is_dir() and (p / "usecase.json").exists():
                 result.append(self.get_usecase(p.name))
         return result
+
+    def usecase_exists(self, usecase_id: str) -> bool:
+        return self._uc_dir(usecase_id).exists()
+
+    def rename_usecase(self, old_id: str, new_id: str) -> UsecaseInfo:
+        """Rename a use case on disk: move its folder and restamp metadata.
+
+        This touches only the filesystem (the folder, ``usecase.json``, and every
+        ``run.json``). The ``usecase_id`` is also a key in the Postgres telemetry
+        and judge tables; those are *not* updated here. The caller must rename the
+        database rows alongside this call (each store exposes ``rename_usecase``)
+        so the filesystem and database stay consistent.
+
+        Per-run ``.venv`` directories are deleted before the move: a uv venv
+        hardcodes absolute paths and would break once relocated. The venv is a
+        pure cache, transparently rebuilt on the next run.
+        """
+        old_dir = self._uc_dir(old_id)
+        if not old_dir.exists():
+            raise UsecaseNotFoundError(old_id)
+        if new_id == old_id:
+            return self.get_usecase(old_id)
+        if not _USECASE_ID_RE.match(new_id):
+            raise RegistryError(
+                f"Invalid use case id {new_id!r}: use letters, digits, and underscores only"
+            )
+        new_dir = self._uc_dir(new_id)
+        if new_dir.exists():
+            raise UsecaseExistsError(new_id)
+
+        # Drop per-run venvs before the move — see docstring.
+        runs_dir = old_dir / "runs"
+        if runs_dir.exists():
+            for run_dir in runs_dir.iterdir():
+                venv = run_dir / ".venv"
+                if venv.is_dir():
+                    shutil.rmtree(venv, ignore_errors=True)
+
+        shutil.move(str(old_dir), str(new_dir))
+
+        # Restamp the usecase_id baked into usecase.json and every run.json.
+        meta_path = new_dir / "usecase.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["usecase_id"] = new_id
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+        new_runs_dir = new_dir / "runs"
+        if new_runs_dir.exists():
+            for run_dir in new_runs_dir.iterdir():
+                run_json = run_dir / "run.json"
+                if run_json.exists():
+                    run_meta = json.loads(run_json.read_text(encoding="utf-8"))
+                    run_meta["usecase_id"] = new_id
+                    _write_run_meta(run_dir, run_meta)
+
+        return self.get_usecase(new_id)
 
     # --- run operations ---
 

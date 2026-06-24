@@ -81,6 +81,14 @@ class ProductionTelemetryStore:
         """Persist a single span (llm_call, tool_call, or user_wait)."""
         raise NotImplementedError
 
+    # --- maintenance --------------------------------------------------------
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id``.
+
+        Default no-op; only the Postgres backend persists ``usecase_id``.
+        """
+
 
 # ---------------------------------------------------------------------------
 # NullProductionTelemetryStore — no-op for tests

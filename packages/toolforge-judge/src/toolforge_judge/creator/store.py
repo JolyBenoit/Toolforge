@@ -33,6 +33,9 @@ class CreatorJudgeStore:
     ) -> CreatorJudgeReport | None:
         raise NotImplementedError
 
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id`` (no-op by default)."""
+
 
 class NullCreatorJudgeStore(CreatorJudgeStore):
     """No-op store for tests / dry runs; remembers nothing."""
@@ -163,6 +166,18 @@ class PostgresCreatorJudgeStore(CreatorJudgeStore):
         if row is None:
             return None
         return CreatorJudgeReport.from_dict(row[0])
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        with self._connect() as conn:
+            for table in (
+                "tf_judge_creator_runs",
+                "tf_judge_creator_instructions",
+            ):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()
 
 
 def get_creator_judge_store(dsn: str) -> CreatorJudgeStore:

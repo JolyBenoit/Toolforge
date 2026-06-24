@@ -53,6 +53,9 @@ class JudgeStore:
         """All per-tool local notes for a use case (optionally one run)."""
         raise NotImplementedError
 
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every persisted row from ``old_id`` to ``new_id`` (no-op by default)."""
+
 
 class NullJudgeStore(JudgeStore):
     """No-op store for tests / dry runs; remembers nothing."""
@@ -229,6 +232,19 @@ class PostgresJudgeStore(JudgeStore):
             )
             for r in rows
         ]
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        with self._connect() as conn:
+            for table in (
+                "tf_judge_static_results",
+                "tf_judge_span_verdicts",
+                "tf_judge_tool_notes",
+            ):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()
 
 
 def get_judge_store(dsn: str) -> JudgeStore:

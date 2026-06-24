@@ -73,7 +73,10 @@ def build_contract_message(spec: ArchitectureSpec, tool: RichToolSpec) -> str:
 
 def parse_contract(tool_id: str, raw_response: str) -> ToolContract:
     """Parse a pass-1 reply into a :class:`ToolContract`."""
-    data = _extract_json(raw_response)
+    try:
+        data = _extract_json(raw_response)
+    except ValueError as exc:
+        raise ValueError(f"pass 1 (contract for tool {tool_id!r}): {exc}") from exc
     return ToolContract(
         tool_id=tool_id,
         output_contract=str(data.get("output_contract", "")),
@@ -127,7 +130,10 @@ def build_findings_message(
 
 def parse_findings(raw_response: str) -> list[ArchitectureFinding]:
     """Parse a pass-2 reply into validated :class:`ArchitectureFinding`s."""
-    data = _extract_json(raw_response)
+    try:
+        data = _extract_json(raw_response)
+    except ValueError as exc:
+        raise ValueError(f"pass 2 (pipeline findings): {exc}") from exc
     findings: list[ArchitectureFinding] = []
     for f in data.get("findings") or []:
         if not isinstance(f, dict) or "category" not in f or "body" not in f:

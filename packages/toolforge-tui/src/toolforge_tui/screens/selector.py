@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Label, Tree
+from textual.widgets import Button, Footer, Header, Input, Label, Tree
 
 from toolforge_registry import Registry
 from toolforge_registry.models import RunInfo
@@ -59,6 +59,58 @@ class _ConfirmScreen(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "confirm")
+
+
+class _RenameUsecaseScreen(ModalScreen[str | None]):
+    """Modal that collects a new id for an existing use case."""
+
+    CSS = """\
+    _RenameUsecaseScreen {
+        align: center middle;
+    }
+    _RenameUsecaseScreen #dialog {
+        width: 64;
+        height: auto;
+        background: $surface;
+        border: thick $accent;
+        padding: 1 2;
+    }
+    _RenameUsecaseScreen #buttons {
+        margin-top: 1;
+        align-horizontal: right;
+        height: auto;
+    }
+    _RenameUsecaseScreen #buttons Button {
+        margin-left: 1;
+    }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, old_id: str) -> None:
+        super().__init__()
+        self._old_id = old_id
+
+    def compose(self) -> ComposeResult:
+        with Container(id="dialog"):
+            yield Label(f"[bold]Rename use case[/] [cyan]{self._old_id}[/]", markup=True)
+            yield Label("New ID (letters, digits, underscores):")
+            yield Input(id="id-input", value=self._old_id)
+            with Horizontal(id="buttons"):
+                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Rename", variant="primary", id="rename")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        new_id = self.query_one("#id-input", Input).value.strip()
+        if not new_id:
+            self.notify("A new ID is required.", severity="warning")
+            return
+        self.dismiss(new_id)
 
 
 @dataclass
@@ -160,6 +212,16 @@ class _SelectorCommands(Provider):
                     ),
                 ]
 
+        uc_id = screen._selected_usecase_id()
+        if uc_id is not None:
+            result.append(
+                (
+                    f"Rename use case  [{uc_id}]",
+                    "Rename this use case everywhere (folder + judge/telemetry rows)",
+                    screen.action_rename_usecase,
+                )
+            )
+
         result += [
             ("New use case", "Create a new use case with an ID and a prompt", screen.action_new_usecase),
             ("Refresh", "Reload the use case list from disk", screen.action_refresh),
@@ -201,6 +263,7 @@ class SelectorScreen(Screen[None]):
     COMMANDS = {_SelectorCommands}
     BINDINGS = [
         ("n", "new_usecase", "New use case"),
+        ("f2", "rename_usecase", "Rename"),
         ("v", "validate_run", "Validate"),
         ("p", "promote_to_production", "Promote"),
         ("f", "fork_run", "Fork"),
@@ -313,6 +376,8 @@ class SelectorScreen(Screen[None]):
         except Exception:
             return True
         status = sel.run.status if sel is not None else None
+        if action == "rename_usecase":
+            return True if self._selected_usecase_id() is not None else None
         if action == "run":
             return True if status in ("validated", "in_production") else None
         if action == "validate_run":
@@ -455,6 +520,100 @@ class SelectorScreen(Screen[None]):
             self._populate_tree()
         except Exception as exc:  # noqa: BLE001
             self.notify(str(exc), severity="error")
+
+    def action_rename_usecase(self) -> None:
+        uc_id = self._selected_usecase_id()
+        if uc_id is None:
+            self.notify("Select a use case (or one of its runs) first.", severity="warning")
+            return
+        self.app.push_screen(
+            _RenameUsecaseScreen(uc_id),
+            callback=lambda new_id: self._on_rename_result(uc_id, new_id),
+        )
+
+    def _on_rename_result(self, old_id: str, new_id: str | None) -> None:
+        if new_id is None:
+            return
+        new_id = new_id.strip()
+        if not new_id or new_id == old_id:
+            return
+        self._rename_usecase(old_id, new_id)
+
+    @work
+    async def _rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Rename a use case across the filesystem and every Postgres store.
+
+        Order matters for crash safety: the Postgres updates run first (each is
+        idempotent — ``UPDATE … WHERE usecase_id = old`` is a no-op once moved),
+        then the folder is moved last. So a failure after a partial DB update
+        heals on a simple retry: the folder is still under the old id, the DB
+        rows already moved are skipped, and the move completes.
+        """
+        if self._registry.usecase_exists(new_id):
+            self.notify(f"A use case named {new_id!r} already exists.", severity="error")
+            return
+
+        from toolforge_core import load_config
+
+        dsn = ""
+        try:
+            config = load_config(self._config_path)
+            dsn = config.telemetry.dsn or ""
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"Could not read config ({exc}); renaming folder only, "
+                "judge/telemetry rows left untouched.",
+                severity="warning",
+                timeout=8,
+            )
+
+        if dsn:
+            try:
+                await asyncio.to_thread(self._rename_db_rows, dsn, old_id, new_id)
+            except Exception as exc:  # noqa: BLE001
+                self.notify(
+                    f"Database rename failed ({exc}); folder left untouched. "
+                    "Fix the database and retry.",
+                    severity="error",
+                    timeout=10,
+                )
+                return
+
+        try:
+            await asyncio.to_thread(self._registry.rename_usecase, old_id, new_id)
+        except Exception as exc:  # noqa: BLE001
+            self.notify(
+                f"Folder rename failed after DB update ({exc}). "
+                f"Database rows now reference {new_id!r} but the folder is still "
+                f"{old_id!r} — retry the rename to finish.",
+                severity="error",
+                timeout=12,
+            )
+            return
+
+        self._registry = Registry(self._data_root)
+        self._populate_tree()
+        self.notify(f"Renamed {old_id!r} → {new_id!r}.", severity="information")
+
+    def _rename_db_rows(self, dsn: str, old_id: str, new_id: str) -> None:
+        """Repoint usecase_id in every Postgres-backed store. Runs off the UI thread."""
+        from toolforge_judge.architecture import get_architecture_judge_store
+        from toolforge_judge.creator import get_creator_judge_store
+        from toolforge_judge.dynamic import get_dynamic_judge_store
+        from toolforge_judge.static import get_judge_store
+        from toolforge_telemetry import get_store
+        from toolforge_telemetry.production import get_production_store
+
+        stores = [
+            get_store("in_production", telemetry_dir=self._data_root, pg_dsn=dsn),
+            get_production_store(dsn),
+            get_judge_store(dsn),
+            get_dynamic_judge_store(dsn),
+            get_creator_judge_store(dsn),
+            get_architecture_judge_store(dsn),
+        ]
+        for store in stores:
+            store.rename_usecase(old_id, new_id)
 
     def action_edit_run(self) -> None:
         sel = self._selected_run()
@@ -672,3 +831,15 @@ class SelectorScreen(Screen[None]):
         if node is None or not isinstance(node.data, _RunData):
             return None
         return node.data
+
+    def _selected_usecase_id(self) -> str | None:
+        """The use case under the cursor, whether a use case row or one of its runs."""
+        node = self.query_one(Tree).cursor_node
+        if node is None:
+            return None
+        data = node.data
+        if isinstance(data, _UsecaseData):
+            return data.usecase_id
+        if isinstance(data, _RunData):
+            return data.usecase_id
+        return None

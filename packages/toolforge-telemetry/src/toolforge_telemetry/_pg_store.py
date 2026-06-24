@@ -211,3 +211,18 @@ class PostgresTelemetryStore(TelemetryStore):
                 (status, _now(), duration_ms, task_id),
             )
             conn.commit()
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every telemetry row from ``old_id`` to ``new_id``.
+
+        All three tables are updated in a single transaction. The operation is
+        idempotent: re-running after a partial failure (rows already moved) is a
+        harmless no-op for the rows that no longer match ``old_id``.
+        """
+        with self._connect() as conn:
+            for table in ("tf_tasks", "tf_tool_calls", "tf_llm_calls"):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()

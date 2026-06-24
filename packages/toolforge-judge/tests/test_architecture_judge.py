@@ -120,6 +120,29 @@ async def test_assess_design_time_flags_truncation():
 
 
 @pytest.mark.asyncio
+async def test_assess_reports_progress():
+    judge = ArchitectureJudge(
+        contract_llm=FakeLLM(_contract_responder),
+        findings_llm=FakeLLM(_findings_responder),
+    )
+    phases: list[tuple[str, int]] = []
+    tools: list[tuple[str, int, int]] = []
+
+    await judge.assess(
+        _spec(),
+        on_phase=lambda name, total: phases.append((name, total)),
+        on_tool=lambda tid, done, total: tools.append((tid, done, total)),
+    )
+
+    # Both phases fire, in order, with the right totals.
+    assert phases == [("contracts", 2), ("findings", 1)]
+    # One tick per tool, with a monotonic done count over a stable total.
+    assert {t[0] for t in tools} == {"pdf_extract", "summarize"}
+    assert [t[1] for t in tools] == [1, 2]
+    assert all(t[2] == 2 for t in tools)
+
+
+@pytest.mark.asyncio
 async def test_post_run_mode_injects_telemetry_digest():
     captured: dict[str, str] = {}
 

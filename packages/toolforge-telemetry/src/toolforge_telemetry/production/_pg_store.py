@@ -334,3 +334,19 @@ class PostgresProductionTelemetryStore(ProductionTelemetryStore):
                 ),
             )
             conn.commit()
+
+    # --- maintenance --------------------------------------------------------
+
+    def rename_usecase(self, old_id: str, new_id: str) -> None:
+        """Repoint every production row from ``old_id`` to ``new_id``.
+
+        Specs, tasks, and spans are updated together in one transaction. The
+        operation is idempotent, so retrying after a partial failure is safe.
+        """
+        with self._connect() as conn:
+            for table in ("tf_prod_pipeline_specs", "tf_prod_tasks", "tf_prod_spans"):
+                conn.execute(
+                    f"UPDATE {table} SET usecase_id = %s WHERE usecase_id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()

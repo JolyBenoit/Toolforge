@@ -17,8 +17,15 @@ store, the spec assembly in the runner. The judge feeds the creator judge — it
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
+
+# Progress callbacks (all optional, fired on the caller's event loop):
+#   on_phase(name, total) — a stage begins ("contracts" then "findings").
+#   on_tool(tool_id, done, total) — one tool's contract finished reading.
+PhaseFn = Callable[[str, int], None]
+ToolFn = Callable[[str, int, int], None]
 
 from ..static.llm import JudgeLLM
 from .models import (
@@ -47,21 +54,37 @@ class ArchitectureJudge:
         self._findings_llm = findings_llm
 
     async def read_contracts(
-        self, spec: ArchitectureSpec, *, max_concurrency: int = 6
+        self,
+        spec: ArchitectureSpec,
+        *,
+        max_concurrency: int = 6,
+        on_tool: ToolFn | None = None,
     ) -> list[ToolContract]:
-        """Pass 1: derive each tool's contract from its handler source."""
+        """Pass 1: derive each tool's contract from its handler source.
+
+        ``on_tool`` (if given) fires as each tool finishes — tools complete in
+        whatever order their network call returns, so it is a liveness signal,
+        not a strict 1, 2, 3 sequence.
+        """
         if not spec.tools:
             return []
         if self._contract_llm is None:
             raise ValueError("read_contracts requires a contract_llm")
         sem = asyncio.Semaphore(max_concurrency)
+        total = len(spec.tools)
+        done = 0  # safe to mutate without a lock: asyncio is single-threaded
 
         async def _one(tool: Any) -> ToolContract:
+            nonlocal done
             async with sem:
                 raw = await self._contract_llm.complete(
                     build_contract_message(spec, tool)
                 )
-            return parse_contract(tool.tool_id, raw)
+            contract = parse_contract(tool.tool_id, raw)
+            done += 1
+            if on_tool is not None:
+                on_tool(tool.tool_id, done, total)
+            return contract
 
         # Preserve spec order so the report is stable across runs.
         return list(await asyncio.gather(*(_one(t) for t in spec.tools)))
@@ -88,14 +111,25 @@ class ArchitectureJudge:
         *,
         dynamic_report: Any = None,
         max_concurrency: int = 6,
+        on_phase: PhaseFn | None = None,
+        on_tool: ToolFn | None = None,
     ) -> ArchitectureJudgeReport:
         """Chain both passes into a full report (side-effect free).
 
         ``dynamic_report=None`` is *design-time* mode (the spec alone, no runs);
         passing a dynamic report switches to *post-run* mode and enriches pass 2
         with a telemetry digest.
+
+        ``on_phase`` / ``on_tool`` (optional) report progress so a UI can show
+        which tools have been processed without waiting for the full report.
         """
-        contracts = await self.read_contracts(spec, max_concurrency=max_concurrency)
+        if on_phase is not None:
+            on_phase("contracts", len(spec.tools))
+        contracts = await self.read_contracts(
+            spec, max_concurrency=max_concurrency, on_tool=on_tool
+        )
+        if on_phase is not None:
+            on_phase("findings", 1)
         findings = await self.synthesize_findings(
             spec, contracts, dynamic_report=dynamic_report
         )
