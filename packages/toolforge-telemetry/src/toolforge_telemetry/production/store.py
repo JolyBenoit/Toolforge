@@ -81,6 +81,23 @@ class ProductionTelemetryStore:
         """Persist a single span (llm_call, tool_call, or user_wait)."""
         raise NotImplementedError
 
+    # --- task maintenance (TUI Runs tab) -----------------------------------
+
+    def delete_tasks(self, task_ids: list[str]) -> int:
+        """Hard-delete the given tasks and their spans. Returns rows removed.
+
+        Spans are removed before tasks to respect the foreign key. Default
+        no-op (only the Postgres backend persists rows).
+        """
+        return 0
+
+    def set_task_status(self, task_ids: list[str], status: TaskStatus) -> int:
+        """Overwrite the status of the given tasks. Returns rows updated.
+
+        Default no-op; only the Postgres backend persists rows.
+        """
+        return 0
+
     # --- maintenance --------------------------------------------------------
 
     def rename_usecase(self, old_id: str, new_id: str) -> None:

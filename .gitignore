@@ -26,6 +26,7 @@ coverage.xml
 use_cases/*
 architecture.md
 CLAUDE.md
+jobs/
 
 # uv
 .uv/

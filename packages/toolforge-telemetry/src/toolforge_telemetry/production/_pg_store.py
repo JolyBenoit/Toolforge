@@ -335,6 +335,34 @@ class PostgresProductionTelemetryStore(ProductionTelemetryStore):
             )
             conn.commit()
 
+    # --- task maintenance (TUI Runs tab) -----------------------------------
+
+    def delete_tasks(self, task_ids: list[str]) -> int:
+        """Hard-delete tasks and their spans in one transaction (FK order)."""
+        if not task_ids:
+            return 0
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM tf_prod_spans WHERE task_id = ANY(%s)", (task_ids,)
+            )
+            cur = conn.execute(
+                "DELETE FROM tf_prod_tasks WHERE task_id = ANY(%s)", (task_ids,)
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def set_task_status(self, task_ids: list[str], status: TaskStatus) -> int:
+        """Overwrite the status of the given tasks."""
+        if not task_ids:
+            return 0
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE tf_prod_tasks SET status = %s WHERE task_id = ANY(%s)",
+                (status, task_ids),
+            )
+            conn.commit()
+            return cur.rowcount
+
     # --- maintenance --------------------------------------------------------
 
     def rename_usecase(self, old_id: str, new_id: str) -> None:

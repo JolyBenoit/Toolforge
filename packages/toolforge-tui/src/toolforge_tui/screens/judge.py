@@ -100,11 +100,30 @@ JudgeScreen #creator-list Checkbox {
     height: auto;
     margin: 0 0 1 0;
 }
+JudgeScreen #runs-table {
+    height: 2fr;
+    border: solid $panel;
+    margin: 0 1;
+}
+JudgeScreen #runs-detail {
+    height: 3fr;
+    border: solid $panel;
+    margin: 0 1;
+}
+JudgeScreen #runs-status {
+    height: auto;
+    padding: 0 1;
+    color: $text-muted;
+}
 """
 
 # Statuses telemetry assigns to a finished task, in display order.
 _SUCCESS = "success"
 _FAILED = "failed"
+
+# Every status a task may carry (mirrors telemetry's ``TaskStatus``); the Runs
+# tab can set any of these on the selected tasks.
+_TASK_STATUSES = ("success", "partial", "failed", "user_aborted", "running")
 
 
 @dataclass
@@ -135,6 +154,24 @@ def _fmt_value(value: float | None) -> str:
     if value is None:
         return "—"
     return f"{value:.3f}"
+
+
+# Colour per task status, for the Runs table and detail header.
+_STATUS_COLORS = {
+    "success": "green",
+    "failed": "red",
+    "partial": "yellow",
+    "user_aborted": "yellow",
+    "running": "cyan",
+}
+
+
+def _status_text(status: str) -> Text:
+    return Text(status, style=_STATUS_COLORS.get(status, "dim"))
+
+
+def _status_markup(status: str) -> str:
+    return f"[{_STATUS_COLORS.get(status, 'dim')}]{status}[/]"
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +280,49 @@ class _RunSelectScreen(ModalScreen[_RunSelection | None]):
         )
 
 
+class _ConfirmScreen(ModalScreen[bool]):
+    """A small yes/no modal — used to gate the irreversible run deletion."""
+
+    CSS = """\
+    _ConfirmScreen {
+        align: center middle;
+    }
+    _ConfirmScreen #dialog {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $error;
+        padding: 1 2;
+    }
+    _ConfirmScreen #buttons {
+        margin-top: 1;
+        align-horizontal: right;
+        height: auto;
+    }
+    _ConfirmScreen #buttons Button {
+        margin-left: 1;
+    }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self._message, markup=True)
+            with Horizontal(id="buttons"):
+                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Delete", variant="error", id="ok")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "ok")
+
+
 class JudgeScreen(Screen[None]):
     """Metrics dashboard + judge launcher for one production use case."""
 
@@ -280,6 +360,11 @@ class JudgeScreen(Screen[None]):
         # The creator report currently rendered (freshly built or loaded), so
         # "Send to Creator" can map checked boxes back to instructions.
         self._current_creator_report: object | None = None
+        # Runs tab: task summaries by task_id, and the multi-selected task_ids
+        # (toggled with Enter on a row). The Runs tab needs only the DSN, so it
+        # works even when the screen is read-only (judges disabled).
+        self._run_summaries: dict[str, dict] = {}
+        self._runs_selected: set[str] = set()
 
     # ------------------------------------------------------------------
     # Layout
@@ -335,6 +420,19 @@ class JudgeScreen(Screen[None]):
                         variant="success", disabled=True,
                     )
                 yield VerticalScroll(id="creator-list")
+            with TabPane("Runs", id="tab-runs"):
+                yield DataTable(id="runs-table", zebra_stripes=True)
+                yield RichLog(id="runs-detail", markup=True)
+                with Horizontal(classes="pane-controls"):
+                    yield Button("✓ success", id="runs-mark-success")
+                    yield Button("~ partial", id="runs-mark-partial")
+                    yield Button("✗ failed", id="runs-mark-failed")
+                    yield Button("⏹ aborted", id="runs-mark-user_aborted")
+                    yield Button(
+                        "Delete selected", id="runs-delete", variant="error"
+                    )
+                    yield Button("Delete all", id="runs-delete-all", variant="error")
+                yield Static("", id="runs-status", markup=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -343,6 +441,12 @@ class JudgeScreen(Screen[None]):
         self.sub_title = f"{self._usecase_id}  ·  {scope}"
         table = self.query_one("#metrics", DataTable)
         table.add_columns("Family", "Metric", "Tool", "Value", "n", "Status")
+        runs_table = self.query_one("#runs-table", DataTable)
+        runs_table.cursor_type = "row"
+        cols = runs_table.add_columns(
+            " ", "Date/heure", "Run", "Status", "#tools", "Tokens", "Latency"
+        )
+        self._runs_mark_col = cols[0]
         if not self._can_run:
             hint = (
                 "[yellow]Read-only — open the Judge from the run selector to "
@@ -357,6 +461,7 @@ class JudgeScreen(Screen[None]):
             self.query_one("#run-architecture", Button).disabled = True
             self.query_one("#run-creator", Button).disabled = True
         self._load()
+        self._load_runs()
         if self._can_run:
             self._refresh_pane_info()
             self.query_one("#architecture-info", Static).update(
@@ -391,6 +496,12 @@ class JudgeScreen(Screen[None]):
             self.action_run_creator()
         elif event.button.id == "send-creator":
             self._send_to_creator()
+        elif event.button.id and event.button.id.startswith("runs-mark-"):
+            self._set_runs_status(event.button.id[len("runs-mark-"):])
+        elif event.button.id == "runs-delete":
+            self._delete_runs(all_listed=False)
+        elif event.button.id == "runs-delete-all":
+            self._delete_runs(all_listed=True)
 
     # ------------------------------------------------------------------
     # Metrics tab — read-only telemetry (off the UI thread)
@@ -1160,6 +1271,191 @@ class JudgeScreen(Screen[None]):
             self.notify(f"Could not open Creator: {exc}", severity="error")
         finally:
             self._set_busy(False)
+
+    # ------------------------------------------------------------------
+    # Runs tab — browse / edit / delete recorded sessions
+    # ------------------------------------------------------------------
+
+    @work(exclusive=False)
+    async def _load_runs(self) -> None:
+        if not self._dsn:
+            self.query_one("#runs-status", Static).update(
+                "[yellow]No DSN configured — production telemetry disabled.[/]"
+            )
+            return
+        try:
+            summaries = await asyncio.to_thread(
+                lambda: TelemetryReader(self._dsn).list_task_summaries(
+                    self._usecase_id, run_id=self._run_id
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.query_one("#runs-status", Static).update(
+                f"[red]Could not list runs: {exc}[/]"
+            )
+            return
+        self._render_runs_table(summaries)
+
+    def _render_runs_table(self, summaries: list[dict]) -> None:
+        table = self.query_one("#runs-table", DataTable)
+        table.clear()
+        self._run_summaries = {s["task_id"]: s for s in summaries}
+        # Drop selections for tasks that no longer exist (after a delete/reload).
+        self._runs_selected &= set(self._run_summaries)
+        for s in summaries:
+            mark = "✓" if s["task_id"] in self._runs_selected else ""
+            run = s["run_id"]
+            run_short = run if len(run) <= 16 else "…" + run[-15:]
+            table.add_row(
+                mark,
+                s["started_at"].strftime("%Y-%m-%d %H:%M"),
+                run_short,
+                _status_text(s["status"]),
+                str(s["tool_calls"]),
+                f"{s['tokens']:,}",
+                f"{s['latency_ms'] / 1000:.1f}s",
+                key=s["task_id"],
+            )
+        self._update_runs_status_line()
+        if summaries:
+            self._show_run_detail(summaries[0]["task_id"])
+        else:
+            self.query_one("#runs-detail", RichLog).clear()
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        if event.data_table.id == "runs-table" and event.row_key.value:
+            self._show_run_detail(event.row_key.value)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "runs-table" or not event.row_key.value:
+            return
+        task_id = event.row_key.value
+        if task_id in self._runs_selected:
+            self._runs_selected.discard(task_id)
+            mark = ""
+        else:
+            self._runs_selected.add(task_id)
+            mark = "✓"
+        self.query_one("#runs-table", DataTable).update_cell(
+            event.row_key, self._runs_mark_col, mark
+        )
+        self._update_runs_status_line()
+
+    @work(exclusive=True)
+    async def _show_run_detail(self, task_id: str) -> None:
+        detail = self.query_one("#runs-detail", RichLog)
+        summary = self._run_summaries.get(task_id)
+        if summary is None:
+            return
+        try:
+            task = await asyncio.to_thread(self._read_task, task_id)
+        except Exception as exc:  # noqa: BLE001
+            detail.clear()
+            detail.write(f"[red]Could not read run: {exc}[/]")
+            return
+        detail.clear()
+        detail.write(f"[bold]{task_id}[/]  [dim]· run {summary['run_id']}[/]")
+        fb = summary.get("user_feedback") or {}
+        fb_txt = fb.get("explicit", "none") if isinstance(fb, dict) else "none"
+        detail.write(
+            f"  {_status_markup(summary['status'])}  ·  "
+            f"[bold]{summary['tokens']:,}[/] tokens  ·  "
+            f"{summary['tool_calls']} tool call(s)  ·  "
+            f"{summary['latency_ms'] / 1000:.1f}s  ·  feedback: {fb_txt}"
+        )
+        if isinstance(fb, dict) and fb.get("correction_text"):
+            detail.write(f"  [dim]↳ {fb['correction_text']}[/]")
+        detail.write("[dim]— timeline —[/]")
+        if task is None or not task.spans:
+            detail.write("[dim]No spans recorded for this run.[/]")
+            return
+        from ._perf import reconstruct_timeline
+
+        for line in reconstruct_timeline(task.spans):
+            detail.write(line)
+
+    def _read_task(self, task_id: str):  # noqa: ANN202
+        """Blocking: load one task with its spans for the detail timeline."""
+        return TelemetryReader(self._dsn).load_task(task_id)
+
+    def _act_targets(self, *, all_listed: bool) -> list[str]:
+        """Task ids an action applies to: the whole list, the multi-selection,
+        else the highlighted row."""
+        if all_listed:
+            return list(self._run_summaries)
+        if self._runs_selected:
+            return list(self._runs_selected)
+        table = self.query_one("#runs-table", DataTable)
+        if table.row_count:
+            try:
+                row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            except Exception:  # noqa: BLE001 - no valid cursor cell
+                return []
+            if row_key.value:
+                return [row_key.value]
+        return []
+
+    @work(exclusive=True)
+    async def _set_runs_status(self, status: str) -> None:
+        targets = self._act_targets(all_listed=False)
+        if not targets:
+            self.notify("Select run(s) first.", severity="warning")
+            return
+        try:
+            from toolforge_telemetry.production import get_production_store
+
+            n = await asyncio.to_thread(
+                lambda: get_production_store(self._dsn).set_task_status(
+                    targets, status
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not update status: {exc}", severity="error")
+            return
+        self.notify(f"Marked {n} run(s) as {status}.", timeout=3)
+        self._runs_selected.clear()
+        self._load_runs()
+        self._load()  # success/failed counts feed the Metrics summary
+
+    @work(exclusive=True)
+    async def _delete_runs(self, *, all_listed: bool) -> None:
+        targets = self._act_targets(all_listed=all_listed)
+        if not targets:
+            self.notify("Select run(s) first.", severity="warning")
+            return
+        scope = "ALL listed run(s)" if all_listed else f"{len(targets)} run(s)"
+        ok = await self.app.push_screen_wait(
+            _ConfirmScreen(
+                f"[bold]Delete {scope}?[/]\n"
+                f"[dim]Hard-deletes {len(targets)} task(s) and their spans. "
+                "Irreversible.[/]"
+            )
+        )
+        if not ok:
+            return
+        try:
+            from toolforge_telemetry.production import get_production_store
+
+            n = await asyncio.to_thread(
+                lambda: get_production_store(self._dsn).delete_tasks(targets)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.notify(f"Could not delete: {exc}", severity="error")
+            return
+        self.notify(f"Deleted {n} run(s).", timeout=3)
+        self._runs_selected.clear()
+        self._load_runs()
+        self._load()
+
+    def _update_runs_status_line(self) -> None:
+        total = len(self._run_summaries)
+        sel = len(self._runs_selected)
+        self.query_one("#runs-status", Static).update(
+            f"[dim]{total} run(s) · {sel} selected.  Enter to (de)select a row, "
+            "buttons act on the selection (else the highlighted row).[/]"
+        )
 
     # ------------------------------------------------------------------
     # Shared helpers

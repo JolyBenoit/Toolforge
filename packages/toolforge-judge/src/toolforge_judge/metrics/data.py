@@ -59,6 +59,8 @@ class SpanRecord:
 
     # llm_call
     response: Any = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
 
     # user_wait
     user_turn: int | None = None
@@ -97,6 +99,8 @@ class SpanRecord:
             retries=list(row.get("retries") or []),
             nested_llm_calls=list(row.get("nested_llm_calls") or []),
             response=row.get("response"),
+            tokens_in=row.get("tokens_in"),
+            tokens_out=row.get("tokens_out"),
             user_turn=row.get("user_turn"),
             user_message=row.get("user_message"),
             contribution=row.get("contribution"),
@@ -316,6 +320,20 @@ class TelemetryReader:
             spans_by_task.setdefault(sr["task_id"], []).append(SpanRecord.from_row(sr))
         return [TaskRecord.from_row(r, spans_by_task.get(r["task_id"], [])) for r in task_rows]
 
+    def load_task(self, task_id: str) -> TaskRecord | None:
+        """Load a single task with its spans (for a detail / timeline view)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM tf_prod_tasks WHERE task_id = %s", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            span_rows = conn.execute(
+                "SELECT * FROM tf_prod_spans WHERE task_id = %s", (task_id,)
+            ).fetchall()
+        spans = [SpanRecord.from_row(sr) for sr in span_rows]
+        return TaskRecord.from_row(row, spans)
+
     def load_window(
         self,
         usecase_id: str,
@@ -353,6 +371,55 @@ class TelemetryReader:
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return {r["status"]: int(r["n"]) for r in rows}
+
+    def list_task_summaries(
+        self,
+        usecase_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """One lightweight summary row per task, newest first (no span scan).
+
+        Tokens and tool counts come from the task-level ``cost`` aggregate
+        (:class:`TaskCost`), so the Runs list stays a single ``tf_prod_tasks``
+        query. ``user_feedback`` is included for the detail summary.
+        """
+        params: list[Any] = [usecase_id]
+        sql = (
+            "SELECT task_id, run_id, status, started_at, ended_at, "
+            "cost, user_feedback "
+            "FROM tf_prod_tasks WHERE usecase_id = %s"
+        )
+        if run_id is not None:
+            sql += " AND run_id = %s"
+            params.append(run_id)
+        sql += " ORDER BY started_at DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        summaries: list[dict[str, Any]] = []
+        for r in rows:
+            cost = r.get("cost") or {}
+            tokens = (
+                int(cost.get("agent_tokens_in", 0))
+                + int(cost.get("agent_tokens_out", 0))
+                + int(cost.get("tool_tokens_in", 0))
+                + int(cost.get("tool_tokens_out", 0))
+            )
+            summaries.append(
+                {
+                    "task_id": r["task_id"],
+                    "run_id": r["run_id"],
+                    "status": r["status"],
+                    "started_at": _as_dt(r["started_at"]),
+                    "ended_at": _opt_dt(r.get("ended_at")),
+                    "tool_calls": int(cost.get("tool_calls", 0)),
+                    "tokens": tokens,
+                    "latency_ms": float(cost.get("latency_ms", 0.0)),
+                    "user_feedback": r.get("user_feedback"),
+                }
+            )
+        return summaries
 
     def count_tasks_by_run(self, usecase_id: str) -> list[tuple[str, int]]:
         """List the pipeline versions of a use case with their task counts.
